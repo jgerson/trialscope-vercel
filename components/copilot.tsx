@@ -71,7 +71,7 @@ export function Copilot({ patient }: { patient: Patient }) {
     <section aria-label="Copilot" className="flex min-h-[560px] flex-col rounded-2xl border border-line bg-surface xl:sticky xl:top-6 xl:max-h-[calc(100dvh-48px)]">
       <div className="flex items-center gap-2 border-b border-line px-5 py-3.5">
         <Sparkles size={17} className="text-accent" />
-        <h2 className="text-[15px] font-semibold">Copilot</h2>
+        <h2 className="font-display text-[24px] leading-none">Copilot</h2>
         <span className="ml-auto text-[12px] text-slate">Searches notes, PubMed and trials</span>
       </div>
 

@@ -69,8 +69,8 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
       <div className={cx("transition-[padding] duration-300", q ? "pt-8" : "pt-[12vh]")}>
         {!q && (
           <div className="mb-8 max-w-[760px]">
-            <h1 className="text-[clamp(30px,4.2vw,46px)] font-bold leading-[1.08] tracking-[-0.03em] text-ink">
-              Search the chart and the literature at once.
+            <h1 className="font-display text-[clamp(44px,6.5vw,84px)] leading-[0.95] tracking-tight text-ink text-balance">
+              Search the chart and <em className="italic text-slate">the literature</em> at once.
             </h1>
             <p className="mt-4 max-w-[62ch] text-[16px] leading-relaxed text-slate">
               {patient ? `${patient.name}'s notes, ` : "Patient notes, "}
@@ -84,7 +84,7 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
           <Search className="pointer-events-none absolute top-1/2 left-5 -translate-y-1/2 text-slate" size={20} />
           <input value={input} onChange={(e) => setInput(e.target.value)} aria-label="Search"
             placeholder="A drug, a gene, a trial ID or a clinical question"
-            className="h-[60px] w-full rounded-2xl border border-line bg-surface pr-28 pl-14 text-[17px] text-ink shadow-[0_1px_2px_rgb(14_26_36/0.04)] transition placeholder:text-slate/70 focus:border-accent focus:ring-4 focus:ring-accent/10 focus:outline-none" />
+            className="h-[60px] w-full rounded-2xl border border-line bg-surface pr-28 pl-14 text-[17px] text-ink transition placeholder:text-slate/70 focus:border-ink focus:ring-4 focus:ring-ink/5 focus:outline-none" />
           <button type="submit" className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded-xl bg-ink px-4 py-2.5 text-[14px] font-semibold text-white hover:bg-ink-2">
             {loading ? <Loader2 size={17} className="animate-spin" /> : "Search"}
           </button>
@@ -117,7 +117,7 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
         <div className="mt-8 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
           <section aria-label="Results" aria-busy={loading}>
             <div className="flex items-baseline gap-3">
-              <h2 className="text-[22px] font-bold tracking-[-0.02em]">{data ? `${data.hits.length} results` : "Searching"}</h2>
+              <h2 className="font-display text-[32px] leading-none tracking-tight">{data ? `${data.hits.length} results` : "Searching"}</h2>
               {data && <span className="text-[13.5px] text-slate">
                 {MODES.find((m) => m.value === data.mode)?.label} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
               </span>}

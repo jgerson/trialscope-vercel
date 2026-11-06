@@ -64,7 +64,7 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
       {/* patient header spans the row */}
       <header className="2xl:col-span-3 xl:col-span-2">
         <p className="text-[13px] text-slate">{patient.age}-year-old {patient.sex.toLowerCase()}, {patient.city}, {patient.state}</p>
-        <h1 className="mt-1 text-[32px] font-bold leading-tight tracking-[-0.025em]">{patient.name}</h1>
+        <h1 className="mt-1 font-display text-[44px] leading-[1.05] tracking-tight">{patient.name}</h1>
         <div className="mt-3 flex flex-wrap gap-2 text-[13px]">
           <span className="rounded-lg bg-accent-soft px-2.5 py-1 font-semibold text-accent-strong">{patient.primary_dx}</span>
           {stageText(patient) && <span className="rounded-lg bg-surface px-2.5 py-1 text-ink-2 ring-1 ring-line">{stageText(patient)}</span>}
