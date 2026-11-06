@@ -1,6 +1,6 @@
 "use client";
 // Copilot panel: streams Claude's answer, shows each turbopuffer call it makes, and turns [T1]-style tags into source cards.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { ArrowUp, ArrowUpRight, BookOpen, ChevronRight, FileText, Loader2, Sparkles } from "lucide-react";
 import type { Hit, Patient } from "@/lib/types";
@@ -184,23 +184,57 @@ function Answer({ text, cites }: { text: string; cites: Record<string, Hit> }) {
   );
 }
 
+const CARD_W = 288;
+const GAP = 8;
+
+// The card is position: fixed, placed from the tag's on-screen box and kept inside the copilot panel, so the
+// panel's scroll area can't clip it. It opens above the tag when there is room, otherwise below.
 function Cite({ tag, hit }: { tag: string; hit?: Hit }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const card = useRef<HTMLSpanElement>(null);
   const color = tag[0] === "N" ? "bg-notes-soft text-notes" : tag[0] === "P" ? "bg-pubmed-soft text-pubmed" : "bg-trials-soft text-trials";
+
+  useLayoutEffect(() => {
+    if (!open || !btn.current || !card.current) { setPos(null); return; }
+    const b = btn.current.getBoundingClientRect();
+    const panel = btn.current.closest("section")?.getBoundingClientRect() ?? { left: 0, right: window.innerWidth, top: 0 };
+    const h = card.current.offsetHeight;
+    const minLeft = Math.max(panel.left, 0) + GAP;
+    const maxLeft = Math.min(panel.right, window.innerWidth) - CARD_W - GAP;
+    const left = Math.max(minLeft, Math.min(b.left + b.width / 2 - CARD_W / 2, maxLeft));
+    const above = b.top - h >= Math.max(panel.top, 0) + GAP;
+    setPos({ left, top: above ? b.top - h : b.bottom });
+  }, [open]);
+
+  // A fixed card would drift away from its tag on scroll or resize, so close it instead.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => { window.removeEventListener("scroll", close, true); window.removeEventListener("resize", close); };
+  }, [open]);
+
   return (
-    <span className="relative inline-block align-baseline" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
-      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+    <span className="inline-block align-baseline" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      <button ref={btn} type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
         className={cx("mx-0.5 rounded-md px-1.5 py-px font-mono text-[11.5px] font-semibold", color)}>{tag}</button>
       {open && hit && (
-        <span className="absolute bottom-full left-1/2 z-20 mb-2 block w-72 -translate-x-1/2 animate-fade-in rounded-xl border border-line bg-surface p-3 text-left shadow-pop">
-          <SourceTag kind={hit.kind} />
-          <span className="mt-1 block text-[13px] font-semibold leading-snug text-ink">{hit.title}</span>
-          <span className="mt-1 block text-[12px] text-slate">{[hit.code, ...hit.meta].filter(Boolean).join(", ")}</span>
-          {hit.url && (
-            <a href={hit.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-[12.5px] font-semibold text-accent">
-              Open the full record<ArrowUpRight size={13} />
-            </a>
-          )}
+        // The padding bridges the gap to the tag, so moving the mouse onto the card doesn't close it.
+        <span ref={card} style={{ left: pos?.left ?? 0, top: pos?.top ?? 0, width: CARD_W, visibility: pos ? "visible" : "hidden" }}
+          className="fixed z-50 block py-2">
+          <span className="block animate-fade-in rounded-xl border border-line bg-surface p-3 text-left shadow-pop">
+            <SourceTag kind={hit.kind} />
+            <span className="mt-1 block text-[13px] font-semibold leading-snug text-ink">{hit.title}</span>
+            <span className="mt-1 block text-[12px] text-slate">{[hit.code, ...hit.meta].filter(Boolean).join(", ")}</span>
+            {hit.url && (
+              <a href={hit.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-[12.5px] font-semibold text-accent">
+                Open the full record<ArrowUpRight size={13} />
+              </a>
+            )}
+          </span>
         </span>
       )}
     </span>
