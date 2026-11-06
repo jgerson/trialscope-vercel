@@ -84,7 +84,7 @@ export type CopilotEvent =
 const GATEWAY_URL = "https://ai-gateway.vercel.sh";
 
 // Direct to Anthropic when ANTHROPIC_API_KEY is set; otherwise through AI Gateway with its key or the Vercel OIDC token.
-async function copilotClient(): Promise<Anthropic> {
+export async function copilotClient(): Promise<Anthropic> {
   if (config.anthropicKey) return new Anthropic({ apiKey: config.anthropicKey });
   const authToken = config.gatewayKey || (await getVercelOidcToken());
   // One retry and a 40s cap per call, so a rate limit or a stuck model shows up as an error instead of a silent timeout.

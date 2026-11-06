@@ -1,6 +1,7 @@
 "use client";
 // Copilot panel: streams Claude's answer, shows each turbopuffer call it makes, and turns [T1]-style tags into source cards.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowUp, ArrowUpRight, BookOpen, Check, ChevronRight, FileText, Loader2, ShieldCheck, Sparkles } from "lucide-react";
@@ -416,6 +417,11 @@ function Cite({ tag, hit }: { tag: string; hit?: Hit }) {
               <a href={hit.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-[12.5px] font-semibold text-accent">
                 Open the full record<ArrowUpRight size={13} />
               </a>
+            )}
+            {hit.kind === "trials" && hit.code && (
+              <Link href={`/trials/${hit.code}`} className="mt-1.5 block text-[12.5px] font-semibold text-accent">
+                Eligibility &amp; sites for this patient
+              </Link>
             )}
           </span>
         </span>

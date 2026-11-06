@@ -69,6 +69,13 @@ npm run dev                  # http://localhost:3000
   and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
   After the answer, a **source check** (a second model call, `lib/grounding.ts`) tests each claim against the exact
   text of the sources it cites, and a footer shows time, tokens and approximate cost.
+- **Trial page** (`/trials/<NCT id>`, linked from trial results and copilot citations): reads the trial live from the
+  ClinicalTrials.gov API, because the index keeps only the first 2,500 characters of eligibility criteria and no sites.
+  - **Eligibility checklist**: one model call (`lib/eligibility.ts`) checks each criterion against the selected
+    patient's record and notes. A *meets* or *doesn't meet* verdict must cite the record or a note, or it is shown as
+    unknown.
+  - **Sites near the patient**: recruiting sites sorted by distance from the patient's town, on an OpenStreetMap map.
+    Patient towns map to coordinates in `lib/places.ts` (the generator's fixed list), so no geocoding service is used.
 - **⌘K**: jump to any patient or search the corpus from anywhere.
 - **Sign-in with Clerk**: every page and API route requires a signed-in user (`clerkMiddleware` in
   `proxy.ts`, plus a check in each API route). New notes are credited to whoever wrote them.

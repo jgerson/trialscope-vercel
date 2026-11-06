@@ -1,7 +1,8 @@
 "use client";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
+import { ArrowUpRight, ClipboardCheck, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
 import type { Hit, Mode, Scope, SearchFilters, SearchResponse } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { HitExplainer, RunOverview } from "./explain";
@@ -175,6 +176,12 @@ function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: strin
             className="inline-flex items-center gap-1 font-medium text-slate hover:text-accent">
             Open on {hit.kind === "pubmed" ? "PubMed" : "ClinicalTrials.gov"}<ArrowUpRight size={14} />
           </a>
+        )}
+        {hit.kind === "trials" && hit.code && (
+          <Link href={`/trials/${hit.code}`} onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center gap-1.5 font-medium text-slate hover:text-accent">
+            <ClipboardCheck size={15} />Eligibility &amp; sites
+          </Link>
         )}
       </div>
     </article>
