@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
+import { clerkAppearance, clerkLocalization } from "@/lib/clerk-appearance";
 import { Instrument_Sans, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -19,7 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={`${instrumentSans.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable}`}>
       <body className="min-h-dvh font-sans antialiased">
-        <ClerkProvider signInUrl="/sign-in" signUpUrl="/sign-up">{children}</ClerkProvider>
+        <ClerkProvider signInUrl="/sign-in" signUpUrl="/sign-up" appearance={clerkAppearance} localization={clerkLocalization}>{children}</ClerkProvider>
       </body>
     </html>
   );
