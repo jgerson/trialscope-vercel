@@ -6,7 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowUp, ArrowUpRight, BookOpen, Check, ChevronRight, FileText, Loader2, ShieldCheck, Sparkles } from "lucide-react";
 import type { GroundingItem, Hit, Patient, SearchResponse, Usage } from "@/lib/types";
-import { HitExplainer } from "./explain";
+import { ExplainDialog } from "./explain";
 import { useApp } from "./app-shell";
 import { cx, SourceTag } from "./ui";
 
@@ -208,7 +208,7 @@ function StepRow({ step, cited }: { step: Step; cited?: Set<string> }) {
           )}
         </div>
       </details>
-      {explain && step.search && <ExplainDialog hit={explain} search={step.search} onClose={() => setExplain(null)} />}
+      {explain && step.search && <ExplainDialog hit={explain} search={step.search} context="Copilot search for" onClose={() => setExplain(null)} />}
     </li>
   );
 }
@@ -229,26 +229,6 @@ function AppliedFilters({ filters }: { filters: { source: string; filters: strin
           </li>
         ))}
       </ul>
-    </div>
-  );
-}
-
-// The search page's Explain panel, opened over the copilot for one result of one copilot search.
-function ExplainDialog({ hit, search, onClose }: { hit: Hit; search: SearchResponse; onClose: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={`Why this result: ${hit.title}`}>
-      <button type="button" aria-label="Close" onClick={onClose} className="absolute inset-0 bg-ink/20" />
-      <div className="relative h-full w-full max-w-[460px] overflow-y-auto border-l border-line bg-surface shadow-pop">
-        <p className="border-b border-line px-5 py-3 text-[12.5px] text-slate">
-          Copilot search for <b className="font-medium text-ink-2">“{search.query}”</b>
-        </p>
-        <HitExplainer hit={hit} data={search} onClose={onClose} closeLabel="Close" />
-      </div>
     </div>
   );
 }

@@ -4,9 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { useUser } from "@clerk/nextjs";
 import { Check, Loader2, Plus } from "lucide-react";
-import type { Note, Patient } from "@/lib/types";
+import type { Note, Patient, WriteReport } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { Copilot } from "./copilot";
+import { SaveDetails } from "./save-details";
 import { cx } from "./ui";
 
 const TYPES = ["Visit note", "Result", "Phone call", "Treatment plan", "Other"];
@@ -27,7 +28,8 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
   const [draft, setDraft] = useState<Note>(initialNotes[0] ?? blank(me));
   const [tab, setTab] = useState<"write" | "read">("read");
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState<{ writeMs: number; visibleMs: number } | null>(null);
+  const [saved, setSaved] = useState<{ report: WriteReport; at: number } | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const original = useMemo(() => notes.find((n) => n.id === selId), [notes, selId]);
   const dirty = !original || original.title !== draft.title || original.body !== draft.body ||
@@ -49,7 +51,7 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
       if (!res.ok) throw new Error(json.error ?? "Save failed.");
       const note = json.note as Note;
       setNotes((ns) => [note, ...ns.filter((n) => n.id !== note.id)].sort((a, b) => b.visit_date.localeCompare(a.visit_date)));
-      setSelId(note.id); setDraft(note); setSaved({ writeMs: json.writeMs, visibleMs: json.visibleMs });
+      setSelId(note.id); setDraft(note); setSaved({ report: json as WriteReport, at: Date.now() });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -123,7 +125,11 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
             <div className="flex items-center gap-3">
               {saved && !dirty && (
                 <span className="inline-flex items-center gap-1.5 text-[12.5px] text-accent-strong">
-                  <Check size={14} />Saved in {(saved.writeMs / 1000).toFixed(2)} s, searchable {Math.round(saved.visibleMs)} ms later
+                  <Check size={14} />Saved in {(saved.report.writeMs / 1000).toFixed(2)} s, searchable {Math.round(saved.report.visibleMs)} ms later
+                  <button type="button" onClick={() => setShowDetails((v) => !v)} aria-expanded={showDetails}
+                    className="ml-1 font-semibold text-ink-2 underline underline-offset-2 hover:text-accent">
+                    {showDetails ? "Hide details" : "Details"}
+                  </button>
                 </span>
               )}
               <button onClick={save} disabled={readOnly || saving || !dirty}
@@ -157,6 +163,7 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
           )}
         </div>
         {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
+        {saved && showDetails && !dirty && <SaveDetails report={saved.report} note={draft} patient={patient} savedAt={saved.at} />}
       </section>
 
       <Copilot patient={patient} />

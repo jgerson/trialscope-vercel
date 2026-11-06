@@ -3,7 +3,7 @@
 import "server-only";
 import Turbopuffer from "@turbopuffer/turbopuffer";
 import { config, NS, RRF_K } from "./config";
-import type { Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse } from "./types";
+import type { Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
@@ -209,23 +209,62 @@ export async function listNotes(patientId: string): Promise<Note[]> {
   }
 }
 
-export async function saveNote(patientId: string, note: Note): Promise<{ id: string; writeMs: number; visibleMs: number }> {
+// How each note attribute is stored, in words, for the save panel. Mirrors NOTE_SCHEMA; the other fields use defaults.
+const NOTE_STORAGE: WriteReport["schema"] = [
+  { field: "text", stored: `title + body: keyword-indexed (BM25) and embedded by turbopuffer with ${config.embedModel}` },
+  { field: "title", stored: "stored for display, not filterable" },
+  { field: "body", stored: "stored for display, not filterable" },
+  { field: "note_type", stored: "filterable" },
+  { field: "visit_date", stored: "filterable" },
+  { field: "author", stored: "filterable" },
+];
+
+/** Upsert one note and report what happened: insert or update, the turbopuffer write report, and when it became visible. */
+export async function saveNote(patientId: string, note: Note): Promise<WriteReport & { id: string }> {
   const namespace = NS.patient(patientId);
+  const ns = tp().namespace(namespace);
+
+  // The current version, if any: an upsert replaces by id, so this decides insert vs update and feeds the diff.
+  const tr = performance.now();
+  let previous: Note | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prev: any = await ns.query({ filters: ["id", "Eq", note.id], top_k: 1,
+      include_attributes: ["title", "body", "note_type", "visit_date", "author"] } as any);
+    const r = prev.rows?.[0];
+    if (r) previous = { id: String(r.id), title: r.title ?? "", body: r.body ?? "", note_type: r.note_type ?? "", visit_date: r.visit_date ?? "", author: r.author ?? "" };
+  } catch {
+    previous = null; // a namespace with no notes yet has nothing to compare against
+  }
+  const readMs = performance.now() - tr;
+
   const row = { ...note, text: `${note.title}\n${note.body}` };
   const t0 = performance.now();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await tp().namespace(namespace).write({ upsert_rows: [row], schema: NOTE_SCHEMA, distance_metric: "cosine_distance" } as any);
+  const res: any = await ns.write({ upsert_rows: [row], schema: NOTE_SCHEMA, distance_metric: "cosine_distance" } as any);
   const writeMs = performance.now() - t0;
 
   // Queries are strongly consistent by default, so a fresh write should be visible straight away.
   const t1 = performance.now();
   for (let i = 0; i < 20; i++) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res: any = await tp().namespace(namespace).query({ filters: ["id", "Eq", note.id], top_k: 1, include_attributes: ["title"] } as any);
-    if (res.rows?.length) break;
+    const q: any = await ns.query({ filters: ["id", "Eq", note.id], top_k: 1, include_attributes: ["title"] } as any);
+    if (q.rows?.length) break;
     await new Promise((r) => setTimeout(r, 50));
   }
-  return { id: note.id, writeMs, visibleMs: performance.now() - t1 };
+  const visibleMs = performance.now() - t1;
+
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const short = (t: string) => (t.length > 600 ? `${t.slice(0, 600)}… (${t.length.toLocaleString()} characters)` : t);
+  return {
+    id: note.id, namespace, kind: previous ? "update" : "insert", previous,
+    row: { id: note.id, title: note.title, body: short(note.body), note_type: note.note_type, visit_date: note.visit_date,
+      author: note.author, text: short(row.text) },
+    bodyChars: note.body.length, schema: NOTE_STORAGE, readMs, writeMs, visibleMs,
+    serverMs: num(res?.performance?.server_total_ms), embeddingMs: num(res?.performance?.embedding_ms),
+    embeddingTokens: num(res?.performance?.embedding_tokens), rowsAffected: num(res?.rows_affected),
+    rowsUpserted: num(res?.rows_upserted), billableBytes: num(res?.billing?.billable_logical_bytes_written),
+  };
 }
 
 let _counts: { at: number; value: Record<string, number> } | null = null;

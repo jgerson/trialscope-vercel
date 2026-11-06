@@ -63,6 +63,9 @@ npm run dev                  # http://localhost:3000
   requests, server and embedding time, cache state and the exact request sent to turbopuffer.
 - **Patient workspace** (`/patients/[id]`): notes list, a markdown editor with read and edit modes,
   and a save that reports how soon the note became searchable (usually tens of milliseconds).
+  **Details** on a save opens "What the save did": insert or update and the diff, where the time went (network,
+  turbopuffer's write, embedding, then until searchable, from turbopuffer's own write report), the row and how each
+  field is stored, and a search that shows where the edited note now ranks.
 - **Copilot**: Claude with two tools, `search` and `read_patient_notes`. Answers stream in, each
   turbopuffer call is listed as it happens, and `[N1]`, `[P1]`, `[T1]` tags open source cards.
   Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
