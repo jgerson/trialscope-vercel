@@ -28,12 +28,14 @@ turbopuffer namespaces, so no data needs loading here.
    | --- | --- |
    | `TURBOPUFFER_API_KEY` | your turbopuffer key (required) |
    | `TURBOPUFFER_REGION` | `aws-us-east-1` |
-   | `APP_PASSWORD` | a password visitors must enter (recommended) |
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
 
-4. Deploy. Changing a variable later needs a redeploy to take effect.
+4. Add **Clerk** from the Vercel Marketplace and connect it to the project. It adds
+   `CLERK_SECRET_KEY` and `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` for you. Who may sign up (open,
+   invite-only or an email allowlist) is set in the Clerk dashboard.
+5. Deploy. Changing a variable later needs a redeploy to take effect.
 
 The copilot runs through [Vercel AI Gateway](https://vercel.com/docs/ai-gateway) and authenticates with the
 project's OIDC token, so it needs no key on Vercel: AI Gateway just has to be enabled for the account.
@@ -64,8 +66,8 @@ npm run dev                  # http://localhost:3000
 - **Copilot**: Claude with two tools, `search` and `read_patient_notes`. Answers stream in, each
   turbopuffer call is listed as it happens, and `[N1]`, `[P1]`, `[T1]` tags open source cards.
 - **⌘K**: jump to any patient or search the corpus from anywhere.
-- **Password gate**: with `APP_PASSWORD` set, every page and API route requires sign-in
-  (signed, HTTP-only cookie, checked in `proxy.ts`).
+- **Sign-in with Clerk**: every page and API route requires a signed-in user (`clerkMiddleware` in
+  `proxy.ts`, plus a check in each API route). New notes are credited to whoever wrote them.
 
 ## How search works
 
@@ -82,12 +84,12 @@ npm run dev                  # http://localhost:3000
 | --- | --- |
 | `app/(app)/page.tsx` | Search page |
 | `app/(app)/patients/[id]/page.tsx` | Patient workspace |
-| `app/login/` | Sign-in page and server action |
+| `app/sign-in/`, `app/sign-up/` | Clerk sign-in and sign-up pages |
 | `app/api/search`, `api/notes`, `api/copilot` | Server routes (the copilot streams NDJSON) |
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
 | `components/` | App shell and ⌘K, search view, explain panel, workspace, copilot |
-| `proxy.ts` | Password check before every request |
+| `proxy.ts` | Clerk sign-in check before every request |
 
 ## Data sources
 

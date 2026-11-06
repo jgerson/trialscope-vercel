@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.6.0",
+    "@clerk/nextjs": "^7.9.25",
     "@fontsource-variable/public-sans": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@turbopuffer/turbopuffer": "^2.14.0",

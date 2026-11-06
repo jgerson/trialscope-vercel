@@ -2,12 +2,15 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { copilotEnabled } from "@/lib/config";
 import { runCopilot, type CopilotEvent } from "@/lib/copilot";
 import { getPatient } from "@/lib/patients";
+import { requireUserId } from "@/lib/session";
 import type { Mode } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
+  const user = await requireUserId();
+  if (user instanceof Response) return user;
   if (!copilotEnabled) {
     return Response.json({ error: "The copilot is off. Deploy on Vercel with AI Gateway, or set AI_GATEWAY_API_KEY or ANTHROPIC_API_KEY." }, { status: 503 });
   }

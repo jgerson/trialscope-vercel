@@ -11,7 +11,6 @@ export const config = {
   onVercel: Boolean(process.env.VERCEL || process.env.VERCEL_OIDC_TOKEN),
   copilotModel:
     process.env.COPILOT_MODEL ?? (process.env.ANTHROPIC_API_KEY ? "claude-sonnet-5-5" : "anthropic/claude-sonnet-5.5"),
-  appPassword: process.env.APP_PASSWORD ?? "",
   readOnly: ["1", "true", "yes"].includes((process.env.READ_ONLY ?? "").toLowerCase()),
   embedModel: "voyage/voyage-4-lite",
 };

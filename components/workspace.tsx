@@ -2,6 +2,7 @@
 // Patient workspace: notes list, note editor and the copilot side by side.
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { useUser } from "@clerk/nextjs";
 import { Check, Loader2, Plus } from "lucide-react";
 import type { Note, Patient } from "@/lib/types";
 import { useApp } from "./app-shell";
@@ -12,15 +13,18 @@ const TYPES = ["Visit note", "Result", "Phone call", "Treatment plan", "Other"];
 const TEMPLATE = "## Subjective\n\n\n## Assessment\n\n\n## Plan\n- ";
 const stageText = (p: Patient) => (!p.stage ? "" : /^(NYHA|Post|Parox|Persis)/.test(p.stage) ? p.stage : `Stage ${p.stage}`);
 
-function blank(): Note {
-  return { id: "", title: "", body: TEMPLATE, note_type: "Visit note", visit_date: new Date().toISOString().slice(0, 10), author: "Dr. Rivera (Oncology)" };
+// The server credits a new note to the signed-in user; the name here is only what the draft shows.
+function blank(author: string): Note {
+  return { id: "", title: "", body: TEMPLATE, note_type: "Visit note", visit_date: new Date().toISOString().slice(0, 10), author };
 }
 
 export function Workspace({ patient, initialNotes }: { patient: Patient; initialNotes: Note[] }) {
   const { readOnly } = useApp();
+  const { user } = useUser();
+  const me = user?.fullName || user?.username || user?.primaryEmailAddress?.emailAddress || "You";
   const [notes, setNotes] = useState(initialNotes);
   const [selId, setSelId] = useState<string>(initialNotes[0]?.id ?? "");
-  const [draft, setDraft] = useState<Note>(initialNotes[0] ?? blank());
+  const [draft, setDraft] = useState<Note>(initialNotes[0] ?? blank(me));
   const [tab, setTab] = useState<"write" | "read">("read");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<{ writeMs: number; visibleMs: number } | null>(null);
@@ -30,11 +34,11 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
     original.note_type !== draft.note_type || original.visit_date !== draft.visit_date;
 
   useEffect(() => {
-    setNotes(initialNotes); setSelId(initialNotes[0]?.id ?? ""); setDraft(initialNotes[0] ?? blank());
+    setNotes(initialNotes); setSelId(initialNotes[0]?.id ?? ""); setDraft(initialNotes[0] ?? blank(me));
     setSaved(null); setTab("read");
   }, [patient.id, initialNotes]);
 
-  const open = (n: Note | null) => { setSelId(n?.id ?? ""); setDraft(n ?? blank()); setSaved(null); setError(null); setTab(n ? "read" : "write"); };
+  const open = (n: Note | null) => { setSelId(n?.id ?? ""); setDraft(n ?? blank(me)); setSaved(null); setError(null); setTab(n ? "read" : "write"); };
 
   const save = async () => {
     if (readOnly || saving) return;

@@ -1,20 +1,18 @@
-// Runs before every request: sends visitors to /login until they enter APP_PASSWORD.
-import { NextResponse, type NextRequest } from "next/server";
-import { AUTH_COOKIE, cookieValid } from "@/lib/auth";
+// Runs before every request: everything except Clerk's sign-in and sign-up pages needs a signed-in user.
+// Pages redirect to /sign-in; API routes get a 401 from auth.protect() instead of a redirect.
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
-export function proxy(request: NextRequest) {
-  const password = process.env.APP_PASSWORD ?? "";
-  if (!password) return NextResponse.next();
-  if (cookieValid(request.cookies.get(AUTH_COOKIE)?.value, password)) return NextResponse.next();
+const isPublic = createRouteMatcher(["/sign-in(.*)", "/sign-up(.*)"]);
 
-  if (request.nextUrl.pathname.startsWith("/api/")) {
-    return NextResponse.json({ error: "Sign in first." }, { status: 401 });
-  }
-  const url = new URL("/login", request.url);
-  return NextResponse.redirect(url);
-}
+export default clerkMiddleware(async (auth, req) => {
+  if (!isPublic(req)) await auth.protect();
+});
 
 export const config = {
-  // Everything except the sign-in page, Next.js assets and static files.
-  matcher: ["/((?!login|_next/static|_next/image|icon.svg|favicon.ico).*)"],
+  matcher: [
+    // Skip Next.js internals and static files.
+    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    // Always run for API routes.
+    "/(api|trpc)(.*)",
+  ],
 };
