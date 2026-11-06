@@ -65,6 +65,10 @@ npm run dev                  # http://localhost:3000
   and a save that reports how soon the note became searchable (usually tens of milliseconds).
 - **Copilot**: Claude with two tools, `search` and `read_patient_notes`. Answers stream in, each
   turbopuffer call is listed as it happens, and `[N1]`, `[P1]`, `[T1]` tags open source cards.
+  Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
+  and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
+  After the answer, a **source check** (a second model call, `lib/grounding.ts`) tests each claim against the exact
+  text of the sources it cites, and a footer shows time, tokens and approximate cost.
 - **⌘K**: jump to any patient or search the corpus from anywhere.
 - **Sign-in with Clerk**: every page and API route requires a signed-in user (`clerkMiddleware` in
   `proxy.ts`, plus a check in each API route). New notes are credited to whoever wrote them.

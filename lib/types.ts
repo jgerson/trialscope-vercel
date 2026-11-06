@@ -92,3 +92,22 @@ export const KIND_LABEL: Record<Kind, string> = {
   pubmed: "PubMed",
   trials: "Clinical trial",
 };
+
+// ---------------------------------------------------------------- copilot explainability
+
+/** One claim from a copilot answer, checked against the sources it cites. */
+export interface GroundingItem {
+  claim: string;
+  tags: string[];
+  verdict: "supported" | "partial" | "unsupported" | "uncited";
+  note: string;
+}
+
+/** Tokens and approximate cost for one copilot answer or its grounding check. */
+export interface Usage {
+  calls: number;
+  inTokens: number;
+  outTokens: number;
+  /** US dollars at AI Gateway list prices; null when the price isn't known (e.g. calling Anthropic directly). */
+  cost: number | null;
+}

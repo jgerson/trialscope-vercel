@@ -4,7 +4,9 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getVercelOidcToken } from "@vercel/oidc";
 import { config, NS } from "./config";
 import { buildFilters, listNotes, search } from "./tpuf";
-import type { Hit, Mode, Patient } from "./types";
+import { checkGrounding } from "./grounding";
+import { costOf } from "./pricing";
+import type { GroundingItem, Hit, Mode, Patient, SearchResponse, Usage } from "./types";
 
 const TAG: Record<Hit["kind"], string> = { notes: "N", pubmed: "P", trials: "T" };
 
@@ -57,12 +59,27 @@ then one sentence on why it fits. End with one line saying eligibility needs phy
 
 ${patient ? `Current patient: ${JSON.stringify(patient)}` : "No patient is selected; the 'patient' source is unavailable."}`;
 
+/** A search as the copilot ran it, slimmed for the browser: enough for the Explain panel and the applied filters. */
+export type StepSearch = Omit<SearchResponse, "hits" | "runs"> & {
+  runs: (Omit<SearchResponse["runs"][number], "request"> & { request: null })[];
+  hits: Hit[];
+};
+
 export type CopilotEvent =
-  | { type: "step"; tool: string; input: Record<string, unknown>; results: number; ms: number; returned: { tag: string; title: string }[]; reasoning?: string }
+  | {
+      type: "step"; tool: string; input: Record<string, unknown>; results: number; ms: number;
+      returned: { tag: string; title: string; key: string }[]; reasoning?: string;
+      // Search steps only: the filters each source actually applied, and the full ranking for the Explain panel.
+      filters?: { source: string; filters: string[] }[]; search?: StepSearch;
+    }
   | { type: "text"; delta: string }
   | { type: "citations"; items: Record<string, Hit> }
   | { type: "error"; message: string }
-  | { type: "done"; seconds: number };
+  | { type: "usage"; usage: Usage }
+  | { type: "done"; seconds: number }
+  | { type: "checking" }
+  | { type: "grounding"; items: GroundingItem[]; ms: number; usage: Usage }
+  | { type: "grounding_error"; message: string };
 
 const GATEWAY_URL = "https://ai-gateway.vercel.sh";
 
@@ -122,7 +139,7 @@ export async function runCopilot(
       if (!patient) return "No patient selected.";
       // Capped: some models ask for 50+ notes, which bloats every later turn of the conversation.
       const notes = (await listNotes(patient.id)).slice(0, Math.min(Number(input.limit ?? 10), 20));
-      const returned: { tag: string; title: string }[] = [];
+      const returned: { tag: string; title: string; key: string }[] = [];
       const out = notes.map((n) => {
         const h: Hit = {
           key: `${NS.patient(patient.id)}:${n.id}`, id: n.id, kind: "notes", namespace: NS.patient(patient.id), title: n.title,
@@ -130,7 +147,7 @@ export async function runCopilot(
           fused: 0, rrf: 0, vector: null, bm25: null, terms: [], raw: {},
         };
         const t = tag(h);
-        returned.push({ tag: t, title: h.title });
+        returned.push({ tag: t, title: h.title, key: h.key });
         return fmt(t, h);
       });
       emit({ type: "step", tool: name, input, results: notes.length, ms: performance.now() - t1, returned, reasoning });
@@ -153,14 +170,23 @@ export async function runCopilot(
     const res = await search(targets, String(input.query ?? ""), mode, Number(input.top_k ?? 8));
     // The model sees at most 15 hits; the step lists exactly those, with the tags it will cite.
     const shown = res.hits.slice(0, 15).map((h) => ({ t: tag(h), h }));
+    // `raw` holds whole source documents and `request` the turbopuffer query body; the browser needs neither.
+    const slim: StepSearch = {
+      ...res,
+      runs: res.runs.map((r) => ({ ...r, request: null })),
+      hits: res.hits.map((h) => ({ ...h, raw: {} })),
+    };
     emit({
       type: "step", tool: name, input, results: res.hits.length, ms: performance.now() - t1,
-      returned: shown.map(({ t, h }) => ({ tag: t, title: h.title })), reasoning,
+      returned: shown.map(({ t, h }) => ({ tag: t, title: h.title, key: h.key })), reasoning,
+      filters: res.runs.map((r) => ({ source: r.short, filters: r.filters })), search: slim,
     });
     return shown.map(({ t, h }) => fmt(t, h)).join("\n\n") || "No results.";
   }
 
   const convo = [...messages];
+  const used = { calls: 0, inTokens: 0, outTokens: 0 };
+  let answer = "";
   for (let turn = 0; turn < 6; turn++) {
     const stream = llm.messages.stream({
       model: config.copilotModel, max_tokens: 1500, system: SYSTEM(patient), tools: TOOLS, messages: convo,
@@ -170,6 +196,9 @@ export async function runCopilot(
     let firstToken: number | null = null;
     stream.on("streamEvent", () => { firstToken ??= performance.now() - tm; });
     const msg = await stream.finalMessage();
+    used.calls += 1;
+    used.inTokens += msg.usage.input_tokens;
+    used.outTokens += msg.usage.output_tokens;
     // Only a turn that calls tools has reasoning to attach; a final answer's text is the answer itself.
     const reasoning = msg.stop_reason === "tool_use" ? reasoningOf(msg.content) : undefined;
     trace("model", {
@@ -177,7 +206,10 @@ export async function runCopilot(
       inTokens: msg.usage.input_tokens, outTokens: msg.usage.output_tokens, reasoning: reasoning?.slice(0, 500),
     });
     convo.push({ role: "assistant", content: msg.content });
-    if (msg.stop_reason !== "tool_use") break;
+    if (msg.stop_reason !== "tool_use") {
+      answer = msg.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim();
+      break;
+    }
     // Text written before a tool call is a preamble; the browser clears it when the next step arrives.
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of msg.content) {
@@ -190,7 +222,28 @@ export async function runCopilot(
     }
     convo.push({ role: "user", content: results });
   }
-  trace("done", { totalMs: Math.round(performance.now() - t0) });
+  const cost = await costOf(config.copilotModel, used.inTokens, used.outTokens);
+  trace("done", { totalMs: Math.round(performance.now() - t0), ...used, cost });
   emit({ type: "citations", items: cites });
+  emit({ type: "usage", usage: { ...used, cost } });
   emit({ type: "done", seconds: (performance.now() - t0) / 1000 });
+  if (!answer) return;
+
+  // Grounding check: give a fresh model call the answer plus the exact text of each cited source, as the copilot saw it.
+  emit({ type: "checking" });
+  const tg = performance.now();
+  try {
+    const citedTags = [...new Set([...answer.matchAll(/\[([NPT]\d+)\]/g)].map((m) => m[1]))].filter((t) => cites[t]);
+    const sources = citedTags.map((t) => ({ tag: t, text: fmt(t, cites[t]) }));
+    // The copilot was given the patient record in its system prompt, so the checker gets it too.
+    const g = await checkGrounding(llm, config.copilotModel, answer, sources, patient ? JSON.stringify(patient) : null);
+    const gCost = await costOf(config.copilotModel, g.inTokens, g.outTokens);
+    const ms = performance.now() - tg;
+    trace("grounding", { ms: Math.round(ms), claims: g.items.length,
+      flagged: g.items.filter((i) => i.verdict !== "supported").length, inTokens: g.inTokens, outTokens: g.outTokens });
+    emit({ type: "grounding", items: g.items, ms, usage: { calls: 1, inTokens: g.inTokens, outTokens: g.outTokens, cost: gCost } });
+  } catch (e) {
+    trace("grounding_error", { message: (e as Error).message.slice(0, 300) });
+    emit({ type: "grounding_error", message: "The source check couldn't run for this answer." });
+  }
 }
