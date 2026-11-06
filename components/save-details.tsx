@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Loader2, Search } from "lucide-react";
 import type { Hit, Note, Patient, SearchResponse, WriteReport } from "@/lib/types";
 import { ExplainDialog } from "./explain";
-import { cx } from "./ui";
+import { cx, highlight } from "./ui";
 
 const ms = (n: number) => (n < 10 ? `${n.toFixed(1)} ms` : `${Math.round(n).toLocaleString()} ms`);
 
@@ -158,7 +158,7 @@ function Timing({ report: r }: { report: WriteReport }) {
 function FindIt({ note, patient, savedAt, initial }: { note: Note; patient: Patient; savedAt: number; initial: string }) {
   const [q, setQ] = useState(initial);
   const [state, setState] = useState<{ loading?: boolean; error?: string; data?: SearchResponse; hit?: Hit | null; after?: number }>({});
-  const [explain, setExplain] = useState(false);
+  const [explain, setExplain] = useState<Hit | null>(null);
 
   async function run() {
     if (!q.trim()) return;
@@ -198,13 +198,38 @@ function FindIt({ note, patient, savedAt, initial }: { note: Note; patient: Pati
             {hit.bm25 ? <> · <span className="text-slate">by keywords</span> #{hit.bm25.rank}</> : <> · <span className="text-slate">no keyword match</span></>}
             {state.after != null && <span className="text-slate"> · searched {(state.after / 1000).toFixed(1)} s after saving</span>}
             {" "}
-            <button type="button" onClick={() => setExplain(true)} className="font-semibold text-accent underline underline-offset-2">Why this rank?</button>
+            <button type="button" onClick={() => setExplain(hit)} className="font-semibold text-accent underline underline-offset-2">Why this rank?</button>
           </p>
         ) : (
           <p className="mt-2.5 text-slate">Not in the top {data.hits.length} for this phrase. Try words that appear in the note.</p>
         )
       )}
-      {explain && hit && data && <ExplainDialog hit={hit} search={data} context="Search after saving:" onClose={() => setExplain(false)} />}
+      {data && !!data.hits.length && (
+        <ol className="mt-3 divide-y divide-line rounded-xl border border-line">
+          {data.hits.map((h) => {
+            const mine = h.id === note.id;
+            return (
+              <li key={h.key} className={cx("flex gap-3 px-3.5 py-2.5", mine && "bg-trials-soft/60")}>
+                <span className="w-6 shrink-0 pt-px text-right font-semibold tabular-nums text-ink">#{h.overall}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="flex flex-wrap items-baseline gap-x-2 text-ink">
+                    <span className="font-medium">{highlight(h.title, h.terms)}</span>
+                    {mine && <span className="rounded-md bg-trials px-1.5 py-px text-[11px] font-semibold text-white">Your edit</span>}
+                  </p>
+                  <p className="text-[12px] text-slate">
+                    {h.meta.filter(Boolean).join(" · ")}
+                    {" · "}meaning #{h.vector?.rank ?? "–"}{" · "}{h.bm25 ? `keywords #${h.bm25.rank}` : "no keyword match"}
+                  </p>
+                  {h.snippet && <p className="mt-1 line-clamp-2 text-[12.5px] leading-relaxed text-ink-2">{highlight(h.snippet, h.terms)}</p>}
+                </div>
+                <button type="button" onClick={() => setExplain(h)}
+                  className="shrink-0 self-start pt-px text-[12px] font-semibold text-ink-2 underline underline-offset-2 hover:text-accent">Why?</button>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {explain && data && <ExplainDialog hit={explain} search={data} context="Search after saving:" onClose={() => setExplain(null)} />}
     </div>
   );
 }
