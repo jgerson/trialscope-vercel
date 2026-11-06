@@ -2,6 +2,7 @@
 // Copilot panel: streams Claude's answer, shows each turbopuffer call it makes, and turns [T1]-style tags into source cards.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { ArrowUp, ArrowUpRight, BookOpen, ChevronRight, FileText, Loader2, Sparkles } from "lucide-react";
 import type { Hit, Patient } from "@/lib/types";
 import { useApp } from "./app-shell";
@@ -194,7 +195,9 @@ function Answer({ text, cites }: { text: string; cites: Record<string, Hit> }) {
   const linked = text.replace(/\[([NPT]\d+)\]/g, (m, tag) => (cites[tag] || !Object.keys(cites).length ? `[${tag}](#cite-${tag})` : m));
   return (
     <div className="prose-ts mt-3">
-      <ReactMarkdown components={{
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
+        // Tables scroll sideways inside the narrow panel instead of squeezing every column.
+        table: ({ children }) => <div className="table-scroll"><table>{children}</table></div>,
         a: ({ href, children }) => {
           const tag = href?.startsWith("#cite-") ? href.slice(6) : null;
           if (tag) return <Cite tag={tag} hit={cites[tag]} />;

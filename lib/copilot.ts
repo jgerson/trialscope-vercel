@@ -49,7 +49,11 @@ Rules:
 - For trial matching, first read the patient's notes, extract diagnosis, stage, biomarkers, age, sex and location, then \
 search trials with filters (usually status Recruiting or Not yet recruiting, the patient's country, and match_patient_age_sex).
 - Say plainly that eligibility needs physician review against the full protocol. Do not give treatment advice.
-- Be concise: a short answer, then a bulleted list of the best matches with one line on why each fits. Use markdown.
+- Only state eligibility details that appear in the tool results. If a fit depends on something the results don't show, \
+say it needs checking instead of assuming it.
+- Format for a narrow side panel. Never use tables. Write one or two sentences, then a bulleted list of the best matches. \
+Start each bullet with the tag and the NCT id in bold, like "[T1] **NCT01234567**", then the trial's short name and phase, \
+then one sentence on why it fits. End with one line saying eligibility needs physician review.
 
 ${patient ? `Current patient: ${JSON.stringify(patient)}` : "No patient is selected; the 'patient' source is unavailable."}`;
 

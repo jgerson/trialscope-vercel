@@ -58,3 +58,8 @@ mark { background: #F5E7B8; color: var(--color-ink); border-radius: 3px; padding
 .prose-ts strong { color: var(--color-ink); font-weight: 650; }
 .prose-ts code { font-family: var(--font-mono); font-size: 12.5px; background: var(--color-paper); padding: 1px 5px; border-radius: 5px; }
 .prose-ts > :first-child { margin-top: 0; }
+.prose-ts .table-scroll { overflow-x: auto; margin: 0 0 0.9em; border: 1px solid var(--color-line); border-radius: 10px; }
+.prose-ts table { border-collapse: collapse; width: 100%; min-width: 480px; font-size: 13px; line-height: 1.45; }
+.prose-ts th { text-align: left; font-weight: 650; color: var(--color-ink); background: var(--color-paper); }
+.prose-ts th, .prose-ts td { padding: 7px 10px; vertical-align: top; border-bottom: 1px solid var(--color-line); }
+.prose-ts tr:last-child td { border-bottom: 0; }
