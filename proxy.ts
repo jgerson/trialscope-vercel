@@ -5,13 +5,21 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
 const isPublic = createRouteMatcher(["/sign-in(.*)"]);
 
+const AUTHORIZED_ORIGINS = ["https://www.trialscope.space", "https://trialscope.space"];
+
 export default clerkMiddleware(
   async (auth, req) => {
     if (!isPublic(req)) await auth.protect();
   },
   // Without these, auth.protect() sends signed-out visitors to Clerk's hosted page instead of the app's own,
   // styled /sign-in. ClerkProvider in app/layout.tsx is given the same path.
-  { signInUrl: "/sign-in" },
+  // authorizedParties: in production, accept session tokens only when they were issued for the app's own origin,
+  // which Clerk recommends against subdomain attacks. Previews and local dev use other origins (and Clerk's
+  // development keys), so they keep the default.
+  {
+    signInUrl: "/sign-in",
+    authorizedParties: process.env.VERCEL_ENV === "production" ? AUTHORIZED_ORIGINS : undefined,
+  },
 );
 
 export const config = {
