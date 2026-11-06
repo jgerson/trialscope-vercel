@@ -66,8 +66,13 @@ const GATEWAY_URL = "https://ai-gateway.vercel.sh";
 async function copilotClient(): Promise<Anthropic> {
   if (config.anthropicKey) return new Anthropic({ apiKey: config.anthropicKey });
   const authToken = config.gatewayKey || (await getVercelOidcToken());
-  return new Anthropic({ baseURL: GATEWAY_URL, authToken });
+  // One retry and a 40s cap per call, so a rate limit or a stuck model shows up as an error instead of a silent timeout.
+  return new Anthropic({ baseURL: GATEWAY_URL, authToken, maxRetries: 1, timeout: 40_000 });
 }
+
+// One JSON line per step in the Vercel runtime logs, to see where a slow answer spent its time.
+const trace = (event: string, data: Record<string, unknown>) =>
+  console.log(JSON.stringify({ copilot: event, model: config.copilotModel, ...data }));
 
 export async function runCopilot(
   messages: Anthropic.MessageParam[],
@@ -95,7 +100,8 @@ export async function runCopilot(
     const t1 = performance.now();
     if (name === "read_patient_notes") {
       if (!patient) return "No patient selected.";
-      const notes = (await listNotes(patient.id)).slice(0, Number(input.limit ?? 10));
+      // Capped: some models ask for 50+ notes, which bloats every later turn of the conversation.
+      const notes = (await listNotes(patient.id)).slice(0, Math.min(Number(input.limit ?? 10), 20));
       const out = notes.map((n) => {
         const h: Hit = {
           key: `${NS.patient(patient.id)}:${n.id}`, id: n.id, kind: "notes", namespace: NS.patient(patient.id), title: n.title,
@@ -132,18 +138,28 @@ export async function runCopilot(
       model: config.copilotModel, max_tokens: 1500, system: SYSTEM(patient), tools: TOOLS, messages: convo,
     });
     stream.on("text", (delta) => emit({ type: "text", delta }));
+    const tm = performance.now();
+    let firstToken: number | null = null;
+    stream.on("streamEvent", () => { firstToken ??= performance.now() - tm; });
     const msg = await stream.finalMessage();
+    trace("model", {
+      turn, ms: Math.round(performance.now() - tm), firstTokenMs: firstToken && Math.round(firstToken), stop: msg.stop_reason,
+      inTokens: msg.usage.input_tokens, outTokens: msg.usage.output_tokens,
+    });
     convo.push({ role: "assistant", content: msg.content });
     if (msg.stop_reason !== "tool_use") break;
     // Text written before a tool call is a preamble; the browser clears it when the next step arrives.
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of msg.content) {
       if (block.type !== "tool_use") continue;
+      const tt = performance.now();
       const out = await runTool(block.name, block.input as Record<string, unknown>);
+      trace("tool", { turn, tool: block.name, ms: Math.round(performance.now() - tt), resultChars: out.length });
       results.push({ type: "tool_result", tool_use_id: block.id, content: out });
     }
     convo.push({ role: "user", content: results });
   }
+  trace("done", { totalMs: Math.round(performance.now() - t0) });
   emit({ type: "citations", items: cites });
   emit({ type: "done", seconds: (performance.now() - t0) / 1000 });
 }
