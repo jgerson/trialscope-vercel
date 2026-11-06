@@ -7,7 +7,7 @@ import type { Hit, Patient } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { cx, SourceTag } from "./ui";
 
-interface Step { tool: string; input: Record<string, unknown>; results: number; ms: number; returned?: { tag: string; title: string }[] }
+interface Step { tool: string; input: Record<string, unknown>; results: number; ms: number; returned?: { tag: string; title: string }[]; reasoning?: string }
 interface Turn { q: string; answer: string; steps: Step[]; cites: Record<string, Hit>; seconds?: number; error?: string; pending: boolean }
 
 const SUGGESTIONS = (p: Patient) => [
@@ -146,6 +146,7 @@ function StepRow({ step }: { step: Step }) {
           <ChevronRight size={14} aria-hidden className="mt-1 shrink-0 transition-transform group-open:rotate-90" />
         </summary>
         <div className="mt-1.5 ml-7 space-y-2 rounded-lg border border-line bg-paper p-2.5">
+          {step.reasoning && <Reasoning text={step.reasoning} />}
           <div>
             <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate">Tool call: {step.tool}</p>
             <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11.5px] text-ink-2">{JSON.stringify(step.input, null, 2)}</pre>
@@ -166,6 +167,26 @@ function StepRow({ step }: { step: Step }) {
         </div>
       </details>
     </li>
+  );
+}
+
+const REASONING_PREVIEW = 360;
+
+function Reasoning({ text }: { text: string }) {
+  const [all, setAll] = useState(false);
+  const long = text.length > REASONING_PREVIEW;
+  return (
+    <div>
+      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate">Model&rsquo;s reasoning</p>
+      <p className="whitespace-pre-wrap break-words text-[12px] italic leading-relaxed text-ink-2">
+        {long && !all ? `${text.slice(0, REASONING_PREVIEW).trimEnd()}…` : text}
+      </p>
+      {long && (
+        <button type="button" onClick={() => setAll((a) => !a)} className="mt-1 text-[11.5px] font-semibold text-accent">
+          {all ? "Show less" : "Show all"}
+        </button>
+      )}
+    </div>
   );
 }
 

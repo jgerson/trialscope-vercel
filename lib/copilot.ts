@@ -54,7 +54,7 @@ search trials with filters (usually status Recruiting or Not yet recruiting, the
 ${patient ? `Current patient: ${JSON.stringify(patient)}` : "No patient is selected; the 'patient' source is unavailable."}`;
 
 export type CopilotEvent =
-  | { type: "step"; tool: string; input: Record<string, unknown>; results: number; ms: number; returned: { tag: string; title: string }[] }
+  | { type: "step"; tool: string; input: Record<string, unknown>; results: number; ms: number; returned: { tag: string; title: string }[]; reasoning?: string }
   | { type: "text"; delta: string }
   | { type: "citations"; items: Record<string, Hit> }
   | { type: "error"; message: string }
@@ -73,6 +73,22 @@ async function copilotClient(): Promise<Anthropic> {
 // One JSON line per step in the Vercel runtime logs, to see where a slow answer spent its time.
 const trace = (event: string, data: Record<string, unknown>) =>
   console.log(JSON.stringify({ copilot: event, model: config.copilotModel, ...data }));
+
+const REASONING_MAX = 4000;
+
+// What the model said before calling tools in a turn: its thinking blocks plus any text it wrote first.
+// This is the model's own account of its choice, not a guaranteed explanation of it.
+function reasoningOf(content: Anthropic.ContentBlock[]): string | undefined {
+  const parts: string[] = [];
+  for (const b of content) {
+    if (b.type === "thinking" && b.thinking.trim()) parts.push(b.thinking.trim());
+    else if (b.type === "redacted_thinking") parts.push("Reasoning was redacted by the provider.");
+    else if (b.type === "text" && b.text.trim()) parts.push(b.text.trim());
+  }
+  const all = parts.join("\n\n");
+  if (!all) return undefined;
+  return all.length > REASONING_MAX ? `${all.slice(0, REASONING_MAX)}…` : all;
+}
 
 export async function runCopilot(
   messages: Anthropic.MessageParam[],
@@ -96,7 +112,7 @@ export async function runCopilot(
   };
   const fmt = (t: string, h: Hit) => `[${t}] ${[h.code, ...h.meta].filter(Boolean).join(" | ")} | ${h.title}\n${h.snippet}`;
 
-  async function runTool(name: string, input: Record<string, unknown>): Promise<string> {
+  async function runTool(name: string, input: Record<string, unknown>, reasoning?: string): Promise<string> {
     const t1 = performance.now();
     if (name === "read_patient_notes") {
       if (!patient) return "No patient selected.";
@@ -113,7 +129,7 @@ export async function runCopilot(
         returned.push({ tag: t, title: h.title });
         return fmt(t, h);
       });
-      emit({ type: "step", tool: name, input, results: notes.length, ms: performance.now() - t1, returned });
+      emit({ type: "step", tool: name, input, results: notes.length, ms: performance.now() - t1, returned, reasoning });
       return out.join("\n\n") || "No notes.";
     }
     const sources = (input.sources as string[]) ?? [];
@@ -135,7 +151,7 @@ export async function runCopilot(
     const shown = res.hits.slice(0, 15).map((h) => ({ t: tag(h), h }));
     emit({
       type: "step", tool: name, input, results: res.hits.length, ms: performance.now() - t1,
-      returned: shown.map(({ t, h }) => ({ tag: t, title: h.title })),
+      returned: shown.map(({ t, h }) => ({ tag: t, title: h.title })), reasoning,
     });
     return shown.map(({ t, h }) => fmt(t, h)).join("\n\n") || "No results.";
   }
@@ -150,9 +166,11 @@ export async function runCopilot(
     let firstToken: number | null = null;
     stream.on("streamEvent", () => { firstToken ??= performance.now() - tm; });
     const msg = await stream.finalMessage();
+    // Only a turn that calls tools has reasoning to attach; a final answer's text is the answer itself.
+    const reasoning = msg.stop_reason === "tool_use" ? reasoningOf(msg.content) : undefined;
     trace("model", {
       turn, ms: Math.round(performance.now() - tm), firstTokenMs: firstToken && Math.round(firstToken), stop: msg.stop_reason,
-      inTokens: msg.usage.input_tokens, outTokens: msg.usage.output_tokens,
+      inTokens: msg.usage.input_tokens, outTokens: msg.usage.output_tokens, reasoning: reasoning?.slice(0, 500),
     });
     convo.push({ role: "assistant", content: msg.content });
     if (msg.stop_reason !== "tool_use") break;
@@ -161,7 +179,8 @@ export async function runCopilot(
     for (const block of msg.content) {
       if (block.type !== "tool_use") continue;
       const tt = performance.now();
-      const out = await runTool(block.name, block.input as Record<string, unknown>);
+      // Every tool call in a turn shares that turn's reasoning: the model decided on them together.
+      const out = await runTool(block.name, block.input as Record<string, unknown>, reasoning);
       trace("tool", { turn, tool: block.name, ms: Math.round(performance.now() - tt), resultChars: out.length });
       results.push({ type: "tool_result", tool_use_id: block.id, content: out });
     }
