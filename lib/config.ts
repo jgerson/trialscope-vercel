@@ -4,12 +4,19 @@ import "server-only";
 export const config = {
   tpufKey: process.env.TURBOPUFFER_API_KEY ?? "",
   tpufRegion: process.env.TURBOPUFFER_REGION ?? "aws-us-east-1",
+  // Copilot: an ANTHROPIC_API_KEY calls Anthropic directly. Without one, calls go through Vercel AI Gateway,
+  // authenticated by AI_GATEWAY_API_KEY or, on Vercel (and locally after `vercel env pull`), the project's OIDC token.
   anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
-  copilotModel: process.env.COPILOT_MODEL ?? "claude-sonnet-5-5",
+  gatewayKey: process.env.AI_GATEWAY_API_KEY ?? "",
+  onVercel: Boolean(process.env.VERCEL || process.env.VERCEL_OIDC_TOKEN),
+  copilotModel:
+    process.env.COPILOT_MODEL ?? (process.env.ANTHROPIC_API_KEY ? "claude-sonnet-5-5" : "anthropic/claude-sonnet-5.5"),
   appPassword: process.env.APP_PASSWORD ?? "",
   readOnly: ["1", "true", "yes"].includes((process.env.READ_ONLY ?? "").toLowerCase()),
   embedModel: "voyage/voyage-4-lite",
 };
+
+export const copilotEnabled = Boolean(config.anthropicKey || config.gatewayKey || config.onVercel);
 
 export const NS = {
   prefix: "ts-",

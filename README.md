@@ -29,11 +29,16 @@ turbopuffer namespaces, so no data needs loading here.
    | `TURBOPUFFER_API_KEY` | your turbopuffer key (required) |
    | `TURBOPUFFER_REGION` | `aws-us-east-1` |
    | `APP_PASSWORD` | a password visitors must enter (recommended) |
-   | `ANTHROPIC_API_KEY` | turns on the copilot (optional) |
-   | `COPILOT_MODEL` | defaults to `claude-sonnet-5-5` (optional) |
+   | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
+   | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
 
 4. Deploy. Changing a variable later needs a redeploy to take effect.
+
+The copilot runs through [Vercel AI Gateway](https://vercel.com/docs/ai-gateway) and authenticates with the
+project's OIDC token, so it needs no key on Vercel: AI Gateway just has to be enabled for the account.
+Requests, spend and latency show up under **AI Gateway → Logs**. Locally, run `vercel link` then
+`vercel env pull .env.local`, or set `AI_GATEWAY_API_KEY`.
 
 Keys are only read on the server; none of them reach the browser.
 

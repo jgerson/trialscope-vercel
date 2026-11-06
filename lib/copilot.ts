@@ -1,6 +1,7 @@
 // The copilot: Claude with two tools backed by turbopuffer, streamed to the browser as NDJSON events.
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
+import { getVercelOidcToken } from "@vercel/oidc";
 import { config, NS } from "./config";
 import { buildFilters, listNotes, search } from "./tpuf";
 import type { Hit, Mode, Patient } from "./types";
@@ -59,13 +60,22 @@ export type CopilotEvent =
   | { type: "error"; message: string }
   | { type: "done"; seconds: number };
 
+const GATEWAY_URL = "https://ai-gateway.vercel.sh";
+
+// Direct to Anthropic when ANTHROPIC_API_KEY is set; otherwise through AI Gateway with its key or the Vercel OIDC token.
+async function copilotClient(): Promise<Anthropic> {
+  if (config.anthropicKey) return new Anthropic({ apiKey: config.anthropicKey });
+  const authToken = config.gatewayKey || (await getVercelOidcToken());
+  return new Anthropic({ baseURL: GATEWAY_URL, authToken });
+}
+
 export async function runCopilot(
   messages: Anthropic.MessageParam[],
   patient: Patient | null,
   mode: Mode,
   emit: (e: CopilotEvent) => void,
 ): Promise<void> {
-  const llm = new Anthropic({ apiKey: config.anthropicKey });
+  const llm = await copilotClient();
   const t0 = performance.now();
   const cites: Record<string, Hit> = {};
   const byKey = new Map<string, string>();

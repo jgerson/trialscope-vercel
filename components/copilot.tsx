@@ -81,7 +81,7 @@ export function Copilot({ patient }: { patient: Patient }) {
             <p className="text-[14px] leading-relaxed text-ink-2">
               {copilotEnabled
                 ? `Ask about ${patient.name.split(" ")[0]}, the literature or open trials. Every answer cites the notes, abstracts and trials it used.`
-                : "The copilot is off on this deployment. Add ANTHROPIC_API_KEY to the environment variables and redeploy to turn it on. Search and notes work without it."}
+                : "The copilot is off on this deployment. Deploy on Vercel with AI Gateway enabled, or set AI_GATEWAY_API_KEY or ANTHROPIC_API_KEY, to turn it on. Search and notes work without it."}
             </p>
             <div className="mt-4 space-y-2">
               {SUGGESTIONS(patient).map((s) => (

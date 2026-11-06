@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { AppShell } from "@/components/app-shell";
-import { config } from "@/lib/config";
+import { config, copilotEnabled } from "@/lib/config";
 import { getPatients } from "@/lib/patients";
 import { corpusCounts } from "@/lib/tpuf";
 
@@ -18,7 +18,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const [patients, counts, jar] = await Promise.all([getPatients(), corpusCounts().catch(() => ({})), cookies()]);
   return (
     <AppShell patients={patients} initialPatientId={jar.get("ts_patient")?.value ?? null}
-      copilotEnabled={Boolean(config.anthropicKey)} readOnly={config.readOnly} counts={counts as Record<string, number>}>
+      copilotEnabled={copilotEnabled} readOnly={config.readOnly} counts={counts as Record<string, number>}>
       {children}
     </AppShell>
   );
