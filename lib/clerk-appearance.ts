@@ -53,6 +53,8 @@ export const clerkAppearance: ProviderProps["appearance"] = {
     socialButtonsBlockButton: "border! border-line-2! shadow-none! hover:bg-paper!",
     footer: "bg-paper! bg-none!",
     footerActionLink: "font-semibold! text-ink! underline! underline-offset-2!",
+    // Removes "Don't have an account? Sign up" under the sign-in form: there is no self sign-up.
+    footerAction: "hidden!",
     userButtonPopoverCard: "rounded-2xl! border! border-line! shadow-pop!",
   },
 };
@@ -61,5 +63,4 @@ export const clerkAppearance: ProviderProps["appearance"] = {
 // Later steps ("Check your email", password reset) keep Clerk's own wording.
 export const clerkLocalization: ProviderProps["localization"] = {
   signIn: { start: { title: "Sign in", subtitle: "Welcome back." } },
-  signUp: { start: { title: "Create your account", subtitle: "It takes less than a minute." } },
 };

@@ -84,7 +84,7 @@ npm run dev                  # http://localhost:3000
 | --- | --- |
 | `app/(app)/page.tsx` | Search page |
 | `app/(app)/patients/[id]/page.tsx` | Patient workspace |
-| `app/sign-in/`, `app/sign-up/` | Clerk sign-in and sign-up pages |
+| `app/sign-in/` | Clerk sign-in page (no sign-up page: accounts are created in Clerk's dashboard) |
 | `app/api/search`, `api/notes`, `api/copilot` | Server routes (the copilot streams NDJSON) |
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/copilot.ts` | Claude tool-use loop and citations |

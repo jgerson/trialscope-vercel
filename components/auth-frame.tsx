@@ -1,4 +1,4 @@
-// The branded frame around Clerk's sign-in and sign-up forms.
+// The branded frame around Clerk's sign-in form.
 export function AuthFrame({ children }: { children: React.ReactNode }) {
   return (
     <main className="grid min-h-dvh place-items-center px-5 py-10">

@@ -1,16 +1,17 @@
-// Runs before every request: everything except Clerk's sign-in and sign-up pages needs a signed-in user.
+// Runs before every request: everything except the sign-in page needs a signed-in user. There is no sign-up page;
+// accounts are created in Clerk's dashboard (the instance is invite-only).
 // Pages redirect to the app's /sign-in; API routes get a 404 from auth.protect() (and a 401 from their own check).
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
-const isPublic = createRouteMatcher(["/sign-in(.*)", "/sign-up(.*)"]);
+const isPublic = createRouteMatcher(["/sign-in(.*)"]);
 
 export default clerkMiddleware(
   async (auth, req) => {
     if (!isPublic(req)) await auth.protect();
   },
   // Without these, auth.protect() sends signed-out visitors to Clerk's hosted page instead of the app's own,
-  // styled /sign-in. ClerkProvider in app/layout.tsx is given the same paths.
-  { signInUrl: "/sign-in", signUpUrl: "/sign-up" },
+  // styled /sign-in. ClerkProvider in app/layout.tsx is given the same path.
+  { signInUrl: "/sign-in" },
 );
 
 export const config = {
