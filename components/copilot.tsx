@@ -2,12 +2,12 @@
 // Copilot panel: streams Claude's answer, shows each turbopuffer call it makes, and turns [T1]-style tags into source cards.
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { ArrowUp, ArrowUpRight, BookOpen, FileText, Loader2, Sparkles } from "lucide-react";
+import { ArrowUp, ArrowUpRight, BookOpen, ChevronRight, FileText, Loader2, Sparkles } from "lucide-react";
 import type { Hit, Patient } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { cx, SourceTag } from "./ui";
 
-interface Step { tool: string; input: Record<string, unknown>; results: number; ms: number }
+interface Step { tool: string; input: Record<string, unknown>; results: number; ms: number; returned?: { tag: string; title: string }[] }
 interface Turn { q: string; answer: string; steps: Step[]; cites: Record<string, Hit>; seconds?: number; error?: string; pending: boolean }
 
 const SUGGESTIONS = (p: Patient) => [
@@ -133,14 +133,38 @@ function StepRow({ step }: { step: Step }) {
   const sources = (step.input.sources as string[] | undefined)?.join(", ");
   const filters = ["trial_status", "trial_phases", "country"].map((k) => step.input[k]).filter(Boolean).flat().join(", ");
   return (
-    <li className="flex gap-2.5 text-[12.5px] leading-relaxed text-slate">
-      <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-md bg-accent-soft text-accent">
-        {isNotes ? <FileText size={12} /> : <BookOpen size={12} />}
-      </span>
-      <span>
-        {isNotes ? "Read the patient's notes" : <>Searched {sources} for <b className="font-medium text-ink-2">“{String(step.input.query)}”</b>{filters ? ` (${filters})` : ""}</>}
-        <span className="tabular-nums">, {step.results} results in {Math.round(step.ms)} ms</span>
-      </span>
+    <li className="text-[12.5px] leading-relaxed text-slate">
+      <details className="group">
+        <summary className="flex cursor-pointer list-none gap-2.5 rounded-md hover:text-ink-2 [&::-webkit-details-marker]:hidden">
+          <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-md bg-accent-soft text-accent">
+            {isNotes ? <FileText size={12} /> : <BookOpen size={12} />}
+          </span>
+          <span className="flex-1">
+            {isNotes ? "Read the patient's notes" : <>Searched {sources} for <b className="font-medium text-ink-2">“{String(step.input.query)}”</b>{filters ? ` (${filters})` : ""}</>}
+            <span className="tabular-nums">, {step.results} results in {Math.round(step.ms)} ms</span>
+          </span>
+          <ChevronRight size={14} aria-hidden className="mt-1 shrink-0 transition-transform group-open:rotate-90" />
+        </summary>
+        <div className="mt-1.5 ml-7 space-y-2 rounded-lg border border-line bg-paper p-2.5">
+          <div>
+            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate">Tool call: {step.tool}</p>
+            <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11.5px] text-ink-2">{JSON.stringify(step.input, null, 2)}</pre>
+          </div>
+          {!!step.returned?.length && (
+            <div>
+              <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate">Returned to the model</p>
+              <ul className="space-y-0.5">
+                {step.returned.map((r) => (
+                  <li key={r.tag} className="flex gap-2">
+                    <span className="w-8 shrink-0 font-mono text-[11.5px] text-accent">{r.tag}</span>
+                    <span className="text-ink-2">{r.title}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </details>
     </li>
   );
 }

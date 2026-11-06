@@ -54,7 +54,7 @@ search trials with filters (usually status Recruiting or Not yet recruiting, the
 ${patient ? `Current patient: ${JSON.stringify(patient)}` : "No patient is selected; the 'patient' source is unavailable."}`;
 
 export type CopilotEvent =
-  | { type: "step"; tool: string; input: Record<string, unknown>; results: number; ms: number }
+  | { type: "step"; tool: string; input: Record<string, unknown>; results: number; ms: number; returned: { tag: string; title: string }[] }
   | { type: "text"; delta: string }
   | { type: "citations"; items: Record<string, Hit> }
   | { type: "error"; message: string }
@@ -102,15 +102,18 @@ export async function runCopilot(
       if (!patient) return "No patient selected.";
       // Capped: some models ask for 50+ notes, which bloats every later turn of the conversation.
       const notes = (await listNotes(patient.id)).slice(0, Math.min(Number(input.limit ?? 10), 20));
+      const returned: { tag: string; title: string }[] = [];
       const out = notes.map((n) => {
         const h: Hit = {
           key: `${NS.patient(patient.id)}:${n.id}`, id: n.id, kind: "notes", namespace: NS.patient(patient.id), title: n.title,
           url: null, meta: [n.visit_date, n.note_type, n.author], code: null, snippet: n.body.slice(0, 900), nsRank: 0, overall: 0,
           fused: 0, rrf: 0, vector: null, bm25: null, terms: [], raw: {},
         };
-        return fmt(tag(h), h);
+        const t = tag(h);
+        returned.push({ tag: t, title: h.title });
+        return fmt(t, h);
       });
-      emit({ type: "step", tool: name, input, results: notes.length, ms: performance.now() - t1 });
+      emit({ type: "step", tool: name, input, results: notes.length, ms: performance.now() - t1, returned });
       return out.join("\n\n") || "No notes.";
     }
     const sources = (input.sources as string[]) ?? [];
@@ -128,8 +131,13 @@ export async function runCopilot(
     }
     if (!targets.length) return "No valid sources.";
     const res = await search(targets, String(input.query ?? ""), mode, Number(input.top_k ?? 8));
-    emit({ type: "step", tool: name, input, results: res.hits.length, ms: performance.now() - t1 });
-    return res.hits.slice(0, 15).map((h) => fmt(tag(h), h)).join("\n\n") || "No results.";
+    // The model sees at most 15 hits; the step lists exactly those, with the tags it will cite.
+    const shown = res.hits.slice(0, 15).map((h) => ({ t: tag(h), h }));
+    emit({
+      type: "step", tool: name, input, results: res.hits.length, ms: performance.now() - t1,
+      returned: shown.map(({ t, h }) => ({ tag: t, title: h.title })),
+    });
+    return shown.map(({ t, h }) => fmt(t, h)).join("\n\n") || "No results.";
   }
 
   const convo = [...messages];
