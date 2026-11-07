@@ -31,6 +31,8 @@ turbopuffer namespaces, so no data needs loading here.
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
+   | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
+   | `LANGFUSE_BASE_URL` | your Langfuse region, e.g. `https://us.cloud.langfuse.com` (with the keys) |
 
 4. Add **Clerk** from the Vercel Marketplace and connect it to the project. It adds
    `CLERK_SECRET_KEY` and `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` for you. Who may sign up (open,
@@ -43,6 +45,23 @@ Requests, spend and latency show up under **AI Gateway → Logs**. Locally, run 
 `vercel env pull .env.local`, or set `AI_GATEWAY_API_KEY`.
 
 Keys are only read on the server; none of them reach the browser.
+
+### Tracing with Langfuse (optional)
+
+With the Langfuse keys set, every copilot question and eligibility check is sent to
+[Langfuse](https://langfuse.com) as one trace, so the exact prompts can be read there:
+
+- **Copilot** (`answer-copilot-question`, an agent, tagged `copilot`): one `generate-response` generation per model
+  turn with the full prompt it was sent (system prompt, tool definitions, earlier turns, tool results), the model's
+  thinking summary and tool calls, tokens and cost; a `search-sources` or `read-patient-notes` tool observation for
+  each tool call, with the filters turbopuffer applied; then `check-answer-grounding`, the source check, with its own
+  generation. Questions in one copilot conversation share a session.
+- **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
+  `assess-eligibility-criteria` generation.
+
+Traces carry the Clerk user id, the Vercel environment (`production`, `preview`, `development`) and the commit as
+the release. Costs are AI Gateway list prices. The setup is in `lib/langfuse-setup.ts` and `lib/langfuse.ts`; without
+the keys it does nothing.
 
 ## Run locally
 
@@ -102,6 +121,7 @@ npm run dev                  # http://localhost:3000
 | `app/api/search`, `api/notes`, `api/copilot` | Server routes (the copilot streams NDJSON) |
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
+| `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `instrumentation.ts` | Optional Langfuse tracing |
 | `components/` | App shell and ⌘K, search view, explain panel, workspace, copilot |
 | `proxy.ts` | Clerk sign-in check before every request |
 

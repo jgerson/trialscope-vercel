@@ -37,7 +37,9 @@ export function Copilot({ patient }: { patient: Patient }) {
   const [input, setInput] = useState("");
   const busy = turns.some((t) => t.pending);
   const end = useRef<HTMLDivElement>(null);
-  useEffect(() => { setTurns([]); }, [patient.id]);
+  // One id per conversation, so the questions in it are grouped as a session in Langfuse. New patient, new conversation.
+  const conversation = useRef<string>("");
+  useEffect(() => { setTurns([]); conversation.current = crypto.randomUUID(); }, [patient.id]);
   useEffect(() => { end.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [turns]);
 
   async function ask(q: string) {
@@ -53,7 +55,9 @@ export function Copilot({ patient }: { patient: Patient }) {
     try {
       const res = await fetch("/api/copilot", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: [...history, { role: "user", content: q }], patientId: patient.id }),
+        body: JSON.stringify({
+          messages: [...history, { role: "user", content: q }], patientId: patient.id, conversationId: conversation.current,
+        }),
       });
       if (!res.ok || !res.body) throw new Error((await res.json().catch(() => ({}))).error ?? "The copilot didn't respond.");
       const reader = res.body.getReader();

@@ -5,7 +5,9 @@ import { getVercelOidcToken } from "@vercel/oidc";
 import { config, NS } from "./config";
 import { buildFilters, listNotes, search } from "./tpuf";
 import { checkGrounding } from "./grounding";
-import { costOf } from "./pricing";
+import { startActiveObservation, startObservation, updateActiveObservation } from "@langfuse/tracing";
+import { assistantMessage, promptOf, usageOf } from "./langfuse";
+import { costOf, priceOf } from "./pricing";
 import type { GroundingItem, Hit, Mode, Patient, SearchResponse, Usage } from "./types";
 
 const TAG: Record<Hit["kind"], string> = { notes: "N", pubmed: "P", trials: "T" };
@@ -111,12 +113,48 @@ function reasoningOf(content: Anthropic.ContentBlock[]): string | undefined {
   return all.length > REASONING_MAX ? `${all.slice(0, REASONING_MAX)}…` : all;
 }
 
+// Langfuse observation names for the tools. Names are an API for dashboards and evaluators: keep them stable.
+const TOOL_OBSERVATION: Record<string, string> = { search: "search-sources", read_patient_notes: "read-patient-notes" };
+
+/**
+ * Answer one copilot question. Traced in Langfuse as an agent: a generation per model turn, a tool observation per tool
+ * call (siblings, in order), then the grounding check as an evaluator.
+ */
 export async function runCopilot(
   messages: Anthropic.MessageParam[],
   patient: Patient | null,
   mode: Mode,
   emit: (e: CopilotEvent) => void,
 ): Promise<void> {
+  const last = messages.at(-1);
+  const question = last?.role === "user"
+    ? (typeof last.content === "string" ? last.content : last.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n"))
+    : "";
+  return startActiveObservation("answer-copilot-question", async (agent) => {
+    agent.update({
+      input: question,
+      metadata: { patientId: patient?.id ?? null, mode, model: config.copilotModel, earlierMessages: messages.length - 1 },
+    });
+    try {
+      const r = await copilotLoop(messages, patient, mode, emit);
+      agent.update({
+        output: r.answer || null,
+        metadata: { turns: r.calls, inTokens: r.inTokens, outTokens: r.outTokens, cost: r.cost, citations: r.citations, seconds: r.seconds },
+        ...(r.answer ? {} : { level: "WARNING" as const, statusMessage: "No answer within the turn limit." }),
+      });
+    } catch (e) {
+      agent.update({ level: "ERROR", statusMessage: (e as Error).message.slice(0, 500) });
+      throw e;
+    }
+  }, { asType: "agent" });
+}
+
+async function copilotLoop(
+  messages: Anthropic.MessageParam[],
+  patient: Patient | null,
+  mode: Mode,
+  emit: (e: CopilotEvent) => void,
+): Promise<{ answer: string; calls: number; inTokens: number; outTokens: number; cost: number | null; citations: number; seconds: number }> {
   const llm = await copilotClient();
   const t0 = performance.now();
   const cites: Record<string, Hit> = {};
@@ -139,6 +177,7 @@ export async function runCopilot(
       if (!patient) return "No patient selected.";
       // Capped: some models ask for 50+ notes, which bloats every later turn of the conversation.
       const notes = (await listNotes(patient.id)).slice(0, Math.min(Number(input.limit ?? 10), 20));
+      updateActiveObservation({ metadata: { namespace: NS.patient(patient.id), notes: notes.length } }, { asType: "tool" });
       const returned: { tag: string; title: string; key: string }[] = [];
       const out = notes.map((n) => {
         const h: Hit = {
@@ -168,6 +207,13 @@ export async function runCopilot(
     }
     if (!targets.length) return "No valid sources.";
     const res = await search(targets, String(input.query ?? ""), mode, Number(input.top_k ?? 8));
+    updateActiveObservation({
+      metadata: {
+        mode, hits: res.hits.length, shownToModel: Math.min(res.hits.length, 15),
+        // The turbopuffer filters each namespace actually applied, which can differ from what the model asked for.
+        namespaces: res.runs.map((r) => ({ source: r.short, filters: r.filters })),
+      },
+    }, { asType: "tool" });
     // The model sees at most 15 hits; the step lists exactly those, with the tags it will cite.
     const shown = res.hits.slice(0, 15).map((h) => ({ t: tag(h), h }));
     // `raw` holds whole source documents and `request` the turbopuffer query body; the browser needs neither.
@@ -187,15 +233,37 @@ export async function runCopilot(
   const convo = [...messages];
   const used = { calls: 0, inTokens: 0, outTokens: 0 };
   let answer = "";
+  const price = await priceOf(config.copilotModel);
   for (let turn = 0; turn < 6; turn++) {
-    const stream = llm.messages.stream({
-      model: config.copilotModel, max_tokens: 1500, system: SYSTEM(patient), tools: TOOLS, messages: convo,
-    });
+    const params: Anthropic.MessageStreamParams = {
+      model: config.copilotModel, max_tokens: 1500, system: SYSTEM(patient), tools: TOOLS, messages: [...convo],
+      // The model thinks before choosing tools either way; "summarized" returns a summary of that thinking instead of an
+      // empty block, for the Reasoning panel and Langfuse.
+      thinking: { type: "adaptive", display: "summarized" },
+    };
+    // One generation per model call, with the exact prompt it was sent (system prompt, tools, every earlier turn).
+    const gen = startObservation("generate-response", {
+      model: config.copilotModel, modelParameters: { max_tokens: params.max_tokens, thinking: "adaptive, summarized" },
+      input: promptOf(params), metadata: { turn },
+    }, { asType: "generation" });
+    const stream = llm.messages.stream(params);
     stream.on("text", (delta) => emit({ type: "text", delta }));
     const tm = performance.now();
     let firstToken: number | null = null;
     stream.on("streamEvent", () => { firstToken ??= performance.now() - tm; });
-    const msg = await stream.finalMessage();
+    let msg: Anthropic.Message;
+    try {
+      msg = await stream.finalMessage();
+    } catch (e) {
+      gen.update({ level: "ERROR", statusMessage: (e as Error).message.slice(0, 500) }).end();
+      throw e;
+    }
+    gen.update({
+      output: assistantMessage(msg.content),
+      completionStartTime: firstToken === null ? undefined : new Date(performance.timeOrigin + tm + firstToken),
+      ...usageOf(msg.usage, price),
+      metadata: { turn, stopReason: msg.stop_reason },
+    }).end();
     used.calls += 1;
     used.inTokens += msg.usage.input_tokens;
     used.outTokens += msg.usage.output_tokens;
@@ -216,7 +284,14 @@ export async function runCopilot(
       if (block.type !== "tool_use") continue;
       const tt = performance.now();
       // Every tool call in a turn shares that turn's reasoning: the model decided on them together.
-      const out = await runTool(block.name, block.input as Record<string, unknown>, reasoning);
+      const input = block.input as Record<string, unknown>;
+      const out = await startActiveObservation(TOOL_OBSERVATION[block.name] ?? "run-tool", async (obs) => {
+        obs.update({ input, metadata: { tool: block.name, toolCallId: block.id, turn } });
+        const text = await runTool(block.name, input, reasoning);
+        // Exactly what the model was given back, tags and all.
+        obs.update({ output: text });
+        return text;
+      }, { asType: "tool" });
       trace("tool", { turn, tool: block.name, ms: Math.round(performance.now() - tt), resultChars: out.length });
       results.push({ type: "tool_result", tool_use_id: block.id, content: out });
     }
@@ -226,24 +301,40 @@ export async function runCopilot(
   trace("done", { totalMs: Math.round(performance.now() - t0), ...used, cost });
   emit({ type: "citations", items: cites });
   emit({ type: "usage", usage: { ...used, cost } });
-  emit({ type: "done", seconds: (performance.now() - t0) / 1000 });
-  if (!answer) return;
+  const seconds = (performance.now() - t0) / 1000;
+  emit({ type: "done", seconds });
+  const result = { answer, ...used, cost, citations: Object.keys(cites).length, seconds };
+  if (!answer) return result;
 
   // Grounding check: give a fresh model call the answer plus the exact text of each cited source, as the copilot saw it.
   emit({ type: "checking" });
   const tg = performance.now();
-  try {
-    const citedTags = [...new Set([...answer.matchAll(/\[([NPT]\d+)\]/g)].map((m) => m[1]))].filter((t) => cites[t]);
-    const sources = citedTags.map((t) => ({ tag: t, text: fmt(t, cites[t]) }));
-    // The copilot was given the patient record in its system prompt, so the checker gets it too.
-    const g = await checkGrounding(llm, config.copilotModel, answer, sources, patient ? JSON.stringify(patient) : null);
-    const gCost = await costOf(config.copilotModel, g.inTokens, g.outTokens);
-    const ms = performance.now() - tg;
-    trace("grounding", { ms: Math.round(ms), claims: g.items.length,
-      flagged: g.items.filter((i) => i.verdict !== "supported").length, inTokens: g.inTokens, outTokens: g.outTokens });
-    emit({ type: "grounding", items: g.items, ms, usage: { calls: 1, inTokens: g.inTokens, outTokens: g.outTokens, cost: gCost } });
-  } catch (e) {
-    trace("grounding_error", { message: (e as Error).message.slice(0, 300) });
-    emit({ type: "grounding_error", message: "The source check couldn't run for this answer." });
-  }
+  // Traced as an evaluator; its model call (verify-answer-claims) nests inside it.
+  await startActiveObservation("check-answer-grounding", async (check) => {
+    try {
+      const citedTags = [...new Set([...answer.matchAll(/\[([NPT]\d+)\]/g)].map((m) => m[1]))].filter((t) => cites[t]);
+      const sources = citedTags.map((t) => ({ tag: t, text: fmt(t, cites[t]) }));
+      check.update({ input: { answer, citedTags } });
+      // The copilot was given the patient record in its system prompt, so the checker gets it too.
+      const g = await checkGrounding(llm, config.copilotModel, answer, sources, patient ? JSON.stringify(patient) : null);
+      const gCost = await costOf(config.copilotModel, g.inTokens, g.outTokens);
+      const ms = performance.now() - tg;
+      trace("grounding", { ms: Math.round(ms), claims: g.items.length,
+        flagged: g.items.filter((i) => i.verdict !== "supported").length, inTokens: g.inTokens, outTokens: g.outTokens });
+      emit({ type: "grounding", items: g.items, ms, usage: { calls: 1, inTokens: g.inTokens, outTokens: g.outTokens, cost: gCost } });
+      const count = (v: GroundingItem["verdict"]) => g.items.filter((i) => i.verdict === v).length;
+      check.update({
+        output: { claims: g.items },
+        metadata: {
+          claims: g.items.length, supported: count("supported"), partial: count("partial"),
+          unsupported: count("unsupported"), uncited: count("uncited"),
+        },
+      });
+    } catch (e) {
+      trace("grounding_error", { message: (e as Error).message.slice(0, 300) });
+      check.update({ level: "ERROR", statusMessage: (e as Error).message.slice(0, 500) });
+      emit({ type: "grounding_error", message: "The source check couldn't run for this answer." });
+    }
+  }, { asType: "evaluator" });
+  return result;
 }

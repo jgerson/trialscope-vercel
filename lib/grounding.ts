@@ -3,6 +3,7 @@
 // don't support, such as eligibility criteria the model filled in from general knowledge.
 import "server-only";
 import type Anthropic from "@anthropic-ai/sdk";
+import { tracedCreate } from "./langfuse";
 import type { GroundingItem } from "./types";
 
 const MAX_CLAIMS = 12;
@@ -70,7 +71,7 @@ export async function checkGrounding(
     ? sources.map((s) => s.text).join("\n\n")
     : "(The answer cites no sources.)";
   const record = patientRecord ? `<patient_record>\n${patientRecord}\n</patient_record>\n\n` : "";
-  const msg = await llm.messages.create({
+  const msg = await tracedCreate("verify-answer-claims", llm, {
     model,
     max_tokens: 2000,
     system: SYSTEM,

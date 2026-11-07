@@ -3,6 +3,7 @@
 // The server enforces the rules that matter: a verdict other than "unknown" must cite evidence that exists.
 import "server-only";
 import type Anthropic from "@anthropic-ai/sdk";
+import { tracedCreate } from "./langfuse";
 import type { Note, Patient } from "./types";
 
 export type CriterionStatus = "meets" | "fails" | "unknown";
@@ -90,7 +91,7 @@ export async function checkEligibility(
   const noteText = tagged
     .map(({ tag, note: n }) => `[${tag}] ${n.visit_date} | ${n.note_type} | ${n.title}\n${n.body.slice(0, NOTE_CHARS)}`)
     .join("\n\n");
-  const msg = await llm.messages.create({
+  const msg = await tracedCreate("assess-eligibility-criteria", llm, {
     model,
     max_tokens: 4000,
     system: SYSTEM,

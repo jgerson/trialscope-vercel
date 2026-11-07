@@ -20,13 +20,18 @@ async function prices(): Promise<Map<string, Price>> {
   return map;
 }
 
-/** Dollars for this many tokens on `model`, or null when the model isn't an AI Gateway id or the list is unreachable. */
-export async function costOf(model: string, inTokens: number, outTokens: number): Promise<number | null> {
+/** Dollars per input and output token on `model`, or null when the model isn't an AI Gateway id or the list is unreachable. */
+export async function priceOf(model: string): Promise<Price | null> {
   if (!model.includes("/")) return null; // a direct Anthropic model id, not priced through the gateway
   try {
-    const p = (await prices()).get(model);
-    return p ? inTokens * p.input + outTokens * p.output : null;
+    return (await prices()).get(model) ?? null;
   } catch {
     return null;
   }
+}
+
+/** Dollars for this many tokens on `model`, or null when the price is unknown. */
+export async function costOf(model: string, inTokens: number, outTokens: number): Promise<number | null> {
+  const p = await priceOf(model);
+  return p ? inTokens * p.input + outTokens * p.output : null;
 }
