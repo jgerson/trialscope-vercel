@@ -74,6 +74,33 @@ export function queryTerms(query: string): string[] {
   return [...new Set(query.toLowerCase().match(/[a-z0-9-]{3,}/g) ?? [])].filter((t) => !STOP.has(t));
 }
 
+/**
+ * The most relevant ~maxLen characters of a passage: the run of sentences with the most query-term hits.
+ * Long passages otherwise cut off before the part that matched.
+ */
+export function bestWindow(text: string, terms: string[], maxLen = 420): string {
+  if (text.length <= maxLen) return text;
+  // Split after . ! ? only when followed by a space and a capital or bracket, so "0.7 W" and "Fig. 2" stay whole.
+  const sentences = text.split(/(?<=[.!?])\s+(?=[A-Z(\[])/).map((x, i, all) => (i < all.length - 1 ? x + " " : x));
+  const GENERIC = new Set(["analysis", "study", "studies", "using", "used", "results", "data", "patients", "trial", "group"]);
+  const words = terms.filter((t) => t.length >= 3 && !GENERIC.has(t));
+  const lows = sentences.map((x) => x.toLowerCase());
+  // A word that shows up in most sentences says little about where the answer is; rare words say a lot.
+  const weight = new Map(words.map((w) => [w, 1 / Math.max(1, lows.filter((l) => l.includes(w)).length)]));
+  const hits = lows.map((low, i) =>
+    words.reduce((n, w) => n + (low.includes(w) ? weight.get(w)! : 0), 0) + (/\d/.test(sentences[i]) ? 0.1 : 0));
+  let best = { start: 0, end: 0, score: -1 };
+  for (let i = 0; i < sentences.length; i++) {
+    let len = 0, score = 0, j = i;
+    while (j < sentences.length && len + sentences[j].length <= maxLen) { len += sentences[j].length; score += hits[j]; j++; }
+    if (j === i) { j = i + 1; score = hits[i]; }
+    if (score > best.score) best = { start: i, end: j, score };
+  }
+  const out = sentences.slice(best.start, best.end).join("").trim();
+  const clipped = out.length > maxLen ? out.slice(0, maxLen) : out;
+  return (best.start > 0 ? "…" : "") + clipped + (best.end < sentences.length || out.length > maxLen ? "…" : "");
+}
+
 function cleanNote(body: string): string {
   return body
     .replace(/(^|\n)\s*#+\s*([^\n]+)\n+/g, "$1$2: ")
@@ -160,19 +187,28 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
   scored.sort((a, b) => b.fused - a.fused);
 
   // Full text: collapse passages to one result per article, keeping its best passage.
+  // The answer is often in the second or third passage (a 10-question test found it there 3 times
+  // out of 10), so each article also carries its next two passages.
   let kept = scored;
   const passageCount = new Map<string, number>();
+  const extra = new Map<string, Row[]>();
   if (kind === "fulltext") {
     const seen = new Set<string>();
     kept = [];
     for (const d of scored) {
       const art = String(d.row.pmcid ?? d.id);
       passageCount.set(art, (passageCount.get(art) ?? 0) + 1);
-      if (seen.has(art)) continue;
+      if (seen.has(art)) {
+        const list = extra.get(art) ?? [];
+        if (list.length < 2) list.push(d.row);
+        extra.set(art, list);
+        continue;
+      }
       seen.add(art);
       kept.push(d);
     }
   }
+  const clip = (t: string) => bestWindow(t, terms, 520);
 
   const hits = kept.slice(0, topK).map((d, i) => {
     const p = present(kind, d.row);
@@ -180,13 +216,17 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
     return {
       key: `${namespace}:${d.id}`, id: d.id, kind, namespace, title: p.title, url: p.url,
       meta: p.meta.filter(Boolean), code: p.code,
-      snippet: p.body.length > 420 ? p.body.slice(0, 420) + "…" : p.body,
+      snippet: kind === "fulltext" ? bestWindow(p.body, terms, 520) : p.body.length > 420 ? p.body.slice(0, 420) + "…" : p.body,
       nsRank: i + 1, fused: d.fused, vector: d.vector, bm25: d.bm25,
       terms: terms.filter((t) => new RegExp(`\\b${t.replace(/[-]/g, "\\-")}`).test(visible)),
       ...(kind === "fulltext" ? {
         section: d.row.section ? String(d.row.section) : null,
         passages: passageCount.get(String(d.row.pmcid)) ?? 1,
         chunk: Number(d.row.chunk ?? 0),
+        more: (extra.get(String(d.row.pmcid)) ?? []).map((r) => ({
+          section: String(r.section ?? ""), snippet: clip(String(r.passage ?? "")), chunk: Number(r.chunk ?? 0),
+          text: String(r.passage ?? ""),
+        })),
       } : {}),
       raw: d.row as Record<string, unknown>,
     };

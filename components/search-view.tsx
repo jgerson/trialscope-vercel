@@ -147,12 +147,19 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
   );
 }
 
+function sectionName(section: string) {
+  const top = section.split(" › ")[0];
+  return top === "Body" ? "Main text" : top;
+}
+
 function queryWords(q: string) {
   return [...new Set(q.toLowerCase().match(/[a-z0-9-]{4,}/g) ?? [])].filter((w) =>
     !["after", "before", "with", "from", "that", "this", "what", "does", "about", "patient", "patients"].includes(w));
 }
 
 function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: string[]; selected: boolean; onSelect: () => void }) {
+  const [showMore, setShowMore] = useState(false);
+  const more = hit.more ?? [];
   return (
     <article tabIndex={0} onClick={onSelect}
       onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); onSelect(); } }}
@@ -167,18 +174,33 @@ function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: strin
       <h3 className="mt-2 text-[16.5px] font-semibold leading-snug tracking-[-0.01em] text-ink">{highlight(hit.title, terms)}</h3>
       {hit.kind === "fulltext" && hit.section && (
         <p className="mt-1.5 text-[12.5px] text-fulltext">
-          Matched in <span className="font-semibold">{hit.section.split(" › ")[0]}</span>
+          Matched in <span className="font-semibold">{sectionName(hit.section)}</span>
           {hit.section.includes(" › ") && <span className="text-slate"> · {hit.section.split(" › ").slice(1).join(" › ")}</span>}
           {(hit.passages ?? 1) > 1 && <span className="text-slate"> · {hit.passages} passages matched</span>}
         </p>
       )}
       <p className={cx("mt-1.5 max-w-[82ch] text-[14px] leading-relaxed text-ink-2",
         hit.kind === "fulltext" && "border-l-2 border-fulltext-soft pl-3")}>{highlight(hit.snippet, terms)}</p>
+      {showMore && more.map((m) => (
+        <div key={m.chunk} className="mt-3 animate-fade-in">
+          <p className="text-[12.5px] text-fulltext">
+            <span className="font-semibold">{sectionName(m.section)}</span>
+            {m.section.includes(" › ") && <span className="text-slate"> · {m.section.split(" › ").slice(1).join(" › ")}</span>}
+          </p>
+          <p className="mt-1 max-w-[82ch] border-l-2 border-fulltext-soft pl-3 text-[14px] leading-relaxed text-ink-2">{highlight(m.snippet, terms)}</p>
+        </div>
+      ))}
       <div className="mt-3 flex items-center gap-5 text-[13px]">
         <button onClick={(e) => { e.stopPropagation(); onSelect(); }} aria-expanded={selected}
           className={cx("inline-flex items-center gap-1.5 font-medium", selected ? "text-accent" : "text-slate hover:text-accent")}>
           <Info size={15} />Explain
         </button>
+        {more.length > 0 && (
+          <button onClick={(e) => { e.stopPropagation(); setShowMore((v) => !v); }} aria-expanded={showMore}
+            className="inline-flex items-center gap-1.5 font-medium text-fulltext hover:underline underline-offset-4">
+            {showMore ? "Show less" : `${more.length} more from this article`}
+          </button>
+        )}
         {hit.url && (
           <a href={hit.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
             className="inline-flex items-center gap-1 font-medium text-slate hover:text-accent">

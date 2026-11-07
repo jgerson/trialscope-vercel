@@ -93,7 +93,11 @@ export async function runCopilot(
   };
   const fmt = (t: string, h: Hit) =>
     `[${t}] ${[h.code, ...h.meta, h.section ? `section: ${h.section}` : "", h.chunk ? `passage ${h.chunk}` : ""].filter(Boolean).join(" | ")}` +
-    ` | ${h.title}\n${h.snippet}`;
+    ` | ${h.title}\n` +
+    // Full text: give the model whole passages (the best three per article), not the on-screen snippet.
+    (h.kind === "fulltext"
+      ? String(h.raw.passage ?? h.snippet) + (h.more ?? []).map((m) => `\n\n(also passage ${m.chunk}, ${m.section}):\n${m.text}`).join("")
+      : h.snippet);
 
   async function runTool(name: string, input: Record<string, unknown>): Promise<string> {
     const t1 = performance.now();

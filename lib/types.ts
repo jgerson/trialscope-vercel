@@ -54,6 +54,8 @@ export interface Hit {
   section?: string | null;
   passages?: number;
   chunk?: number;
+  /** Full-text results only: the next-best passages from the same article (up to two). */
+  more?: { section: string; snippet: string; chunk: number; text: string }[];
   raw: Record<string, unknown>;
 }
 
