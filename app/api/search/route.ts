@@ -3,10 +3,13 @@ import { NS } from "@/lib/config";
 import { getPatient } from "@/lib/patients";
 import { buildFilters, search } from "@/lib/tpuf";
 import type { Mode, Scope, SearchFilters } from "@/lib/types";
+import { requireUserId } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const user = await requireUserId();
+  if (user instanceof Response) return user;
   const body = (await req.json()) as {
     q: string; scope: Scope; mode: Mode; filters: SearchFilters; topK?: number; patientId?: string;
   };

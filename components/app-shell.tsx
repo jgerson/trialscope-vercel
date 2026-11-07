@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { UserButton, useUser } from "@clerk/nextjs";
 import { FileText, Menu, Search, X } from "lucide-react";
 import type { Patient } from "@/lib/types";
 import { cx, Kbd, LogoMark } from "./ui";
@@ -149,6 +150,7 @@ function Sidebar({ open, onClose, counts }: { open: boolean; onClose: () => void
           </li>
         ))}
       </ul>
+      <Account />
       <div className="border-t border-line px-5 py-3 text-[11.5px] leading-relaxed text-slate">
         {counts.pubmed ? `${counts.pubmed.toLocaleString()} abstracts and ${counts.trials.toLocaleString()} trials on turbopuffer. ` : ""}
         Personal learning project. Synthetic patients, not for clinical use.
@@ -202,6 +204,22 @@ function CommandPalette({ onClose }: { onClose: () => void }) {
             </li>
           ))}
         </ul>
+      </div>
+    </div>
+  );
+}
+
+// The signed-in user, with Clerk's menu for profile and sign-out.
+function Account() {
+  const { user } = useUser();
+  if (!user) return null;
+  const name = user.fullName || user.username || user.primaryEmailAddress?.emailAddress;
+  return (
+    <div className="flex items-center gap-2.5 border-t border-line px-5 py-3">
+      <UserButton />
+      <div className="min-w-0">
+        <div className="truncate text-[13px] font-medium text-ink">{name}</div>
+        {user.fullName && <div className="truncate text-[11.5px] text-slate">{user.primaryEmailAddress?.emailAddress}</div>}
       </div>
     </div>
   );

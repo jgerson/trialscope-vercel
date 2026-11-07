@@ -1,5 +1,6 @@
 "use client";
 // The right-hand panel: how the search ran, or why one result ranked where it did.
+import { useEffect } from "react";
 import { ArrowUpRight, X } from "lucide-react";
 import type { Hit, NamespaceRun, SearchResponse } from "@/lib/types";
 import { cx, SourceTag } from "./ui";
@@ -103,7 +104,8 @@ function Signal({ title, sig, topK, children }: { title: string; sig: Hit["vecto
   );
 }
 
-export function HitExplainer({ hit, data, onClose }: { hit: Hit; data: SearchResponse; onClose: () => void }) {
+export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search overview" }:
+  { hit: Hit; data: SearchResponse; onClose: () => void; closeLabel?: string }) {
   const k = data.rrfK;
   const run = data.runs.find((r) => r.namespace === hit.namespace)!;
   const multi = data.runs.length > 1;
@@ -114,7 +116,7 @@ export function HitExplainer({ hit, data, onClose }: { hit: Hit; data: SearchRes
           <SourceTag kind={hit.kind} />
           <h3 className="mt-1 text-[15px] font-semibold leading-snug text-ink">{hit.title}</h3>
         </div>
-        <button onClick={onClose} aria-label="Back to search overview" className="rounded-lg bg-paper p-1.5 text-slate hover:text-ink"><X size={16} /></button>
+        <button onClick={onClose} aria-label={closeLabel} className="rounded-lg bg-paper p-1.5 text-slate hover:text-ink"><X size={16} /></button>
       </div>
 
       <div className="mt-4 flex items-baseline gap-2">
@@ -190,6 +192,26 @@ export function HitExplainer({ hit, data, onClose }: { hit: Hit; data: SearchRes
           Open the full record <ArrowUpRight size={15} />
         </a>
       )}
+    </div>
+  );
+}
+
+/** The Explain panel for one result, opened as a side dialog over another view (the copilot, a note save). */
+export function ExplainDialog({ hit, search, context, onClose }: { hit: Hit; search: SearchResponse; context: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={`Why this result: ${hit.title}`}>
+      <button type="button" aria-label="Close" onClick={onClose} className="absolute inset-0 bg-ink/20" />
+      <div className="relative h-full w-full max-w-[460px] overflow-y-auto border-l border-line bg-surface shadow-pop">
+        <p className="border-b border-line px-5 py-3 text-[12.5px] text-slate">
+          {context} <b className="font-medium text-ink-2">“{search.query}”</b>
+        </p>
+        <HitExplainer hit={hit} data={search} onClose={onClose} closeLabel="Close" />
+      </div>
     </div>
   );
 }

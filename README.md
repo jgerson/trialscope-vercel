@@ -28,14 +28,40 @@ turbopuffer namespaces, so no data needs loading here.
    | --- | --- |
    | `TURBOPUFFER_API_KEY` | your turbopuffer key (required) |
    | `TURBOPUFFER_REGION` | `aws-us-east-1` |
-   | `APP_PASSWORD` | a password visitors must enter (recommended) |
-   | `ANTHROPIC_API_KEY` | turns on the copilot (optional) |
-   | `COPILOT_MODEL` | defaults to `claude-sonnet-5-5` (optional) |
+   | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
+   | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
+   | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
+   | `LANGFUSE_BASE_URL` | your Langfuse region, e.g. `https://us.cloud.langfuse.com` (with the keys) |
 
-4. Deploy. Changing a variable later needs a redeploy to take effect.
+4. Add **Clerk** from the Vercel Marketplace and connect it to the project. It adds
+   `CLERK_SECRET_KEY` and `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` for you. Who may sign up (open,
+   invite-only or an email allowlist) is set in the Clerk dashboard.
+5. Deploy. Changing a variable later needs a redeploy to take effect.
+
+The copilot runs through [Vercel AI Gateway](https://vercel.com/docs/ai-gateway) and authenticates with the
+project's OIDC token, so it needs no key on Vercel: AI Gateway just has to be enabled for the account.
+Requests, spend and latency show up under **AI Gateway → Logs**. Locally, run `vercel link` then
+`vercel env pull .env.local`, or set `AI_GATEWAY_API_KEY`.
 
 Keys are only read on the server; none of them reach the browser.
+
+### Tracing with Langfuse (optional)
+
+With the Langfuse keys set, every copilot question and eligibility check is sent to
+[Langfuse](https://langfuse.com) as one trace, so the exact prompts can be read there:
+
+- **Copilot** (`answer-copilot-question`, an agent, tagged `copilot`): one `generate-response` generation per model
+  turn with the full prompt it was sent (system prompt, tool definitions, earlier turns, tool results), the model's
+  thinking summary and tool calls, tokens and cost; a `search-sources` or `read-patient-notes` tool observation for
+  each tool call, with the filters turbopuffer applied; then `check-answer-grounding`, the source check, with its own
+  generation. Questions in one copilot conversation share a session.
+- **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
+  `assess-eligibility-criteria` generation.
+
+Traces carry the Clerk user id, the Vercel environment (`production`, `preview`, `development`) and the commit as
+the release. Costs are AI Gateway list prices. The setup is in `lib/langfuse-setup.ts` and `lib/langfuse.ts`; without
+the keys it does nothing.
 
 ## Run locally
 
@@ -60,11 +86,25 @@ npm run dev                  # http://localhost:3000
   requests, server and embedding time, cache state and the exact request sent to turbopuffer.
 - **Patient workspace** (`/patients/[id]`): notes list, a markdown editor with read and edit modes,
   and a save that reports how soon the note became searchable (usually tens of milliseconds).
+  **Details** on a save opens "What the save did": insert or update and the diff, where the time went (network,
+  turbopuffer's write, embedding, then until searchable, from turbopuffer's own write report), the row and how each
+  field is stored, and a search that shows where the edited note now ranks.
 - **Copilot**: Claude with two tools, `search` and `read_patient_notes`. Answers stream in, each
   turbopuffer call is listed as it happens, and `[N1]`, `[P1]`, `[T1]` tags open source cards.
+  Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
+  and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
+  After the answer, a **source check** (a second model call, `lib/grounding.ts`) tests each claim against the exact
+  text of the sources it cites, and a footer shows time, tokens and approximate cost.
+- **Trial page** (`/trials/<NCT id>`, linked from trial results and copilot citations): reads the trial live from the
+  ClinicalTrials.gov API, because the index keeps only the first 2,500 characters of eligibility criteria and no sites.
+  - **Eligibility checklist**: one model call (`lib/eligibility.ts`) checks each criterion against the selected
+    patient's record and notes. A *meets* or *doesn't meet* verdict must cite the record or a note, or it is shown as
+    unknown.
+  - **Sites near the patient**: recruiting sites sorted by distance from the patient's town, on an OpenStreetMap map.
+    Patient towns map to coordinates in `lib/places.ts` (the generator's fixed list), so no geocoding service is used.
 - **⌘K**: jump to any patient or search the corpus from anywhere.
-- **Password gate**: with `APP_PASSWORD` set, every page and API route requires sign-in
-  (signed, HTTP-only cookie, checked in `proxy.ts`).
+- **Sign-in with Clerk**: every page and API route requires a signed-in user (`clerkMiddleware` in
+  `proxy.ts`, plus a check in each API route). New notes are credited to whoever wrote them.
 
 ## How search works
 
@@ -85,12 +125,13 @@ npm run dev                  # http://localhost:3000
 | --- | --- |
 | `app/(app)/page.tsx` | Search page |
 | `app/(app)/patients/[id]/page.tsx` | Patient workspace |
-| `app/login/` | Sign-in page and server action |
+| `app/sign-in/` | Clerk sign-in page (no sign-up page: accounts are created in Clerk's dashboard) |
 | `app/api/search`, `api/notes`, `api/copilot` | Server routes (the copilot streams NDJSON) |
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
+| `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `instrumentation.ts` | Optional Langfuse tracing |
 | `components/` | App shell and ⌘K, search view, explain panel, workspace, copilot |
-| `proxy.ts` | Password check before every request |
+| `proxy.ts` | Clerk sign-in check before every request |
 
 ## Data sources
 

@@ -2,12 +2,15 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { config } from "@/lib/config";
 import { getPatient } from "@/lib/patients";
+import { displayName, requireUserId } from "@/lib/session";
 import { saveNote } from "@/lib/tpuf";
 import type { Note } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const user = await requireUserId();
+  if (user instanceof Response) return user;
   if (config.readOnly) return NextResponse.json({ error: "Editing is turned off on this deployment." }, { status: 403 });
   const { patientId, note } = (await req.json()) as { patientId: string; note: Partial<Note> };
   if (!(await getPatient(patientId))) return NextResponse.json({ error: "Unknown patient." }, { status: 404 });
@@ -17,7 +20,8 @@ export async function POST(req: Request) {
     body: (note.body ?? "").slice(0, 20000),
     note_type: note.note_type || "Visit note",
     visit_date: note.visit_date || new Date().toISOString().slice(0, 10),
-    author: note.author || "Dr. Rivera (Oncology)",
+    // A new note is credited to whoever is signed in. An edit keeps the note's original author.
+    author: note.id ? note.author || (await displayName()) : await displayName(),
   };
   try {
     const res = await saveNote(patientId, clean);

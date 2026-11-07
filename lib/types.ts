@@ -99,3 +99,41 @@ export const KIND_LABEL: Record<Kind, string> = {
   fulltext: "Full text",
   trials: "Clinical trial",
 };
+
+// ---------------------------------------------------------------- copilot explainability
+
+/** One claim from a copilot answer, checked against the sources it cites. */
+export interface GroundingItem {
+  claim: string;
+  tags: string[];
+  verdict: "supported" | "partial" | "unsupported" | "uncited";
+  note: string;
+}
+
+/** What one note save did in turbopuffer, for the "What the save did" panel. Numbers come from the write response. */
+export interface WriteReport {
+  namespace: string;
+  kind: "insert" | "update";
+  previous: Note | null; // the stored version before this upsert, for the diff
+  row: Record<string, string>; // the row as sent, with a long body shortened for display
+  bodyChars: number;
+  schema: { field: string; stored: string }[];
+  readMs: number; // looking up the previous version
+  writeMs: number; // the upsert, measured from the app server (network included)
+  visibleMs: number; // from write acknowledged to the note being returned by a query
+  serverMs: number | null; // turbopuffer's own processing time for the write
+  embeddingMs: number | null;
+  embeddingTokens: number | null;
+  rowsAffected: number | null;
+  rowsUpserted: number | null;
+  billableBytes: number | null;
+}
+
+/** Tokens and approximate cost for one copilot answer or its grounding check. */
+export interface Usage {
+  calls: number;
+  inTokens: number;
+  outTokens: number;
+  /** US dollars at AI Gateway list prices; null when the price isn't known (e.g. calling Anthropic directly). */
+  cost: number | null;
+}

@@ -2,39 +2,45 @@
 // Patient workspace: notes list, note editor and the copilot side by side.
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { useUser } from "@clerk/nextjs";
 import { Check, Loader2, Plus } from "lucide-react";
-import type { Note, Patient } from "@/lib/types";
+import type { Note, Patient, WriteReport } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { Copilot } from "./copilot";
+import { SaveDetails } from "./save-details";
 import { cx } from "./ui";
 
 const TYPES = ["Visit note", "Result", "Phone call", "Treatment plan", "Other"];
 const TEMPLATE = "## Subjective\n\n\n## Assessment\n\n\n## Plan\n- ";
 const stageText = (p: Patient) => (!p.stage ? "" : /^(NYHA|Post|Parox|Persis)/.test(p.stage) ? p.stage : `Stage ${p.stage}`);
 
-function blank(): Note {
-  return { id: "", title: "", body: TEMPLATE, note_type: "Visit note", visit_date: new Date().toISOString().slice(0, 10), author: "Dr. Rivera (Oncology)" };
+// The server credits a new note to the signed-in user; the name here is only what the draft shows.
+function blank(author: string): Note {
+  return { id: "", title: "", body: TEMPLATE, note_type: "Visit note", visit_date: new Date().toISOString().slice(0, 10), author };
 }
 
 export function Workspace({ patient, initialNotes }: { patient: Patient; initialNotes: Note[] }) {
   const { readOnly } = useApp();
+  const { user } = useUser();
+  const me = user?.fullName || user?.username || user?.primaryEmailAddress?.emailAddress || "You";
   const [notes, setNotes] = useState(initialNotes);
   const [selId, setSelId] = useState<string>(initialNotes[0]?.id ?? "");
-  const [draft, setDraft] = useState<Note>(initialNotes[0] ?? blank());
+  const [draft, setDraft] = useState<Note>(initialNotes[0] ?? blank(me));
   const [tab, setTab] = useState<"write" | "read">("read");
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState<{ writeMs: number; visibleMs: number } | null>(null);
+  const [saved, setSaved] = useState<{ report: WriteReport; at: number } | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const original = useMemo(() => notes.find((n) => n.id === selId), [notes, selId]);
   const dirty = !original || original.title !== draft.title || original.body !== draft.body ||
     original.note_type !== draft.note_type || original.visit_date !== draft.visit_date;
 
   useEffect(() => {
-    setNotes(initialNotes); setSelId(initialNotes[0]?.id ?? ""); setDraft(initialNotes[0] ?? blank());
+    setNotes(initialNotes); setSelId(initialNotes[0]?.id ?? ""); setDraft(initialNotes[0] ?? blank(me));
     setSaved(null); setTab("read");
   }, [patient.id, initialNotes]);
 
-  const open = (n: Note | null) => { setSelId(n?.id ?? ""); setDraft(n ?? blank()); setSaved(null); setError(null); setTab(n ? "read" : "write"); };
+  const open = (n: Note | null) => { setSelId(n?.id ?? ""); setDraft(n ?? blank(me)); setSaved(null); setError(null); setTab(n ? "read" : "write"); };
 
   const save = async () => {
     if (readOnly || saving) return;
@@ -45,7 +51,7 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
       if (!res.ok) throw new Error(json.error ?? "Save failed.");
       const note = json.note as Note;
       setNotes((ns) => [note, ...ns.filter((n) => n.id !== note.id)].sort((a, b) => b.visit_date.localeCompare(a.visit_date)));
-      setSelId(note.id); setDraft(note); setSaved({ writeMs: json.writeMs, visibleMs: json.visibleMs });
+      setSelId(note.id); setDraft(note); setSaved({ report: json as WriteReport, at: Date.now() });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -64,7 +70,7 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
       {/* patient header spans the row */}
       <header className="2xl:col-span-3 xl:col-span-2">
         <p className="text-[13px] text-slate">{patient.age}-year-old {patient.sex.toLowerCase()}, {patient.city}, {patient.state}</p>
-        <h1 className="mt-1 text-[32px] font-bold leading-tight tracking-[-0.025em]">{patient.name}</h1>
+        <h1 className="mt-1 font-display text-[44px] leading-[1.05] tracking-tight">{patient.name}</h1>
         <div className="mt-3 flex flex-wrap gap-2 text-[13px]">
           <span className="rounded-lg bg-accent-soft px-2.5 py-1 font-semibold text-accent-strong">{patient.primary_dx}</span>
           {stageText(patient) && <span className="rounded-lg bg-surface px-2.5 py-1 text-ink-2 ring-1 ring-line">{stageText(patient)}</span>}
@@ -119,7 +125,11 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
             <div className="flex items-center gap-3">
               {saved && !dirty && (
                 <span className="inline-flex items-center gap-1.5 text-[12.5px] text-accent-strong">
-                  <Check size={14} />Saved in {(saved.writeMs / 1000).toFixed(2)} s, searchable {Math.round(saved.visibleMs)} ms later
+                  <Check size={14} />Saved in {(saved.report.writeMs / 1000).toFixed(2)} s, searchable {Math.round(saved.report.visibleMs)} ms later
+                  <button type="button" onClick={() => setShowDetails((v) => !v)} aria-expanded={showDetails}
+                    className="ml-1 font-semibold text-ink-2 underline underline-offset-2 hover:text-accent">
+                    {showDetails ? "Hide details" : "Details"}
+                  </button>
                 </span>
               )}
               <button onClick={save} disabled={readOnly || saving || !dirty}
@@ -153,6 +163,7 @@ export function Workspace({ patient, initialNotes }: { patient: Patient; initial
           )}
         </div>
         {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
+        {saved && showDetails && !dirty && <SaveDetails report={saved.report} note={draft} patient={patient} savedAt={saved.at} />}
       </section>
 
       <Copilot patient={patient} />
