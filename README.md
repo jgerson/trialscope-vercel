@@ -77,9 +77,11 @@ npm run dev                  # http://localhost:3000
   articles and trials. Choose the sources, the retrieval mode (hybrid, vector or BM25) and filters
   (trial status, phase, country, patient age and sex; PubMed year and topic). Links are shareable:
   `/?q=...`.
-- **Full text**: open-access articles from PubMed Central, stored as passages and shown one result
-  per article with the passage and section that matched. If a paper matches as both an abstract and
-  full text, only the higher-ranked one is shown.
+- **Full text**: 2,000 open-access articles from PubMed Central, stored as passages and shown one
+  result per article, labeled with the section that matched ("Matched in Methods") and how many
+  passages matched. **More from this article** expands the next two best passages, and the card shows
+  the stretch of the passage that best matches the question rather than its first lines. If a paper
+  matches as both an abstract and full text, only the higher-ranked one is shown.
 - **Explain**: select any result to see its rank by meaning and by keywords, drawn as a small
   ladder, plus its cosine distance, BM25 score, matched words, the RRF arithmetic and how it merged
   with the other sources. With nothing selected, the panel shows how the search ran: parallel
@@ -105,7 +107,13 @@ npm run dev                  # http://localhost:3000
     Patient towns map to coordinates in `lib/places.ts` (the generator's fixed list), so no geocoding service is used.
 - **⌘K**: jump to any patient or search the corpus from anywhere.
 - **Sign-in with Clerk**: every page and API route requires a signed-in user (`clerkMiddleware` in
-  `proxy.ts`, plus a check in each API route). New notes are credited to whoever wrote them.
+  `proxy.ts`, plus a check in each API route). There is no sign-up page; accounts are created in Clerk's
+  dashboard. In production, session tokens are accepted only for trialscope.space. New notes are credited to
+  whoever wrote them.
+- **Security and operations**: every response forbids framing by other sites and content-type guessing, uses a
+  strict referrer policy, and turns off camera, microphone, location, payment and USB access (`next.config.ts`). The
+  two production vercel.app addresses redirect to www.trialscope.space; branch previews keep their own addresses.
+  Vercel Web Analytics counts page views.
 
 ## How search works
 
@@ -120,18 +128,46 @@ npm run dev                  # http://localhost:3000
   article title and section name. A search fetches up to five passages per requested result and keeps
   the best passage per article.
 
+## Data
+
+All data lives in turbopuffer (`aws-us-east-1`) and is loaded by scripts in
+[jgerson/trialscope-demo](https://github.com/jgerson/trialscope-demo).
+
+| Namespace | Contents | Rows |
+| --- | --- | --- |
+| `ts-pmc` | Full-text passages from 2,000 open-access articles (1,000 oncology, 1,000 cardiology), 2024 onward | 22,664 |
+| `ts-pubmed` | Oncology and cardiology abstracts, 2015 onward | 70,990 |
+| `ts-trials` | Interventional studies, most recently updated first | 49,400 |
+| `ts-patients` | Directory of synthetic patients | 100 |
+| `ts-patient-0001` … `0100` | Chart notes, one namespace per patient | 447 seeded notes |
+
+On 10 questions whose answers sit only in an article's body, abstract search showed the answer 0 times,
+the best full-text passage 7 times, and an article's top three passages all 10 (`ingest/eval_fulltext.py`
+in the Streamlit repo).
+
+## Known limits
+
+- Full text covers 2024 onward only; older papers are searchable by abstract.
+- When the answer shares no words with the question, a card's snippet can show the wrong stretch of a passage;
+  the copilot still reads whole passages.
+- Trial eligibility text in the index is cut at 2,500 characters; the trial page reads the full criteria live.
+- Each patient has their own namespace, so a question across all patients needs one query per patient.
+
 ## Files
 
 | Path | Job |
 | --- | --- |
 | `app/(app)/page.tsx` | Search page |
 | `app/(app)/patients/[id]/page.tsx` | Patient workspace |
+| `app/(app)/trials/[nct]/page.tsx` | Trial page: eligibility checklist and nearby sites |
 | `app/sign-in/` | Clerk sign-in page (no sign-up page: accounts are created in Clerk's dashboard) |
-| `app/api/search`, `api/notes`, `api/copilot` | Server routes (the copilot streams NDJSON) |
+| `app/api/search`, `api/notes`, `api/copilot`, `api/eligibility` | Server routes (the copilot streams NDJSON) |
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
+| `lib/grounding.ts` | Source check: each claim tested against the text it cites |
+| `lib/eligibility.ts`, `lib/ctgov.ts`, `lib/places.ts` | Eligibility checklist, live ClinicalTrials.gov reads, site distances |
 | `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `instrumentation.ts` | Optional Langfuse tracing |
-| `components/` | App shell and ⌘K, search view, explain panel, workspace, copilot |
+| `components/` | App shell and ⌘K, search view, explain panel, workspace and save details, copilot, trial view and sites map, sign-in frame |
 | `proxy.ts` | Clerk sign-in check before every request |
 
 ## Data sources
