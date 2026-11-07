@@ -1,8 +1,8 @@
 // Types shared by the server routes and the browser.
 
-export type Kind = "notes" | "pubmed" | "trials";
+export type Kind = "notes" | "pubmed" | "fulltext" | "trials";
 export type Mode = "hybrid" | "vector" | "bm25";
-export type Scope = "patient" | "literature" | "trials" | "all";
+export type Scope = "patient" | "literature" | "fulltext" | "trials" | "all";
 
 export interface Patient {
   id: string;
@@ -50,6 +50,10 @@ export interface Hit {
   vector: Signal | null;
   bm25: Signal | null;
   terms: string[];
+  /** Full-text results only: the section the best passage came from, and how many passages matched. */
+  section?: string | null;
+  passages?: number;
+  chunk?: number;
   raw: Record<string, unknown>;
 }
 
@@ -90,5 +94,6 @@ export interface SearchResponse {
 export const KIND_LABEL: Record<Kind, string> = {
   notes: "Patient note",
   pubmed: "PubMed",
+  fulltext: "Full text",
   trials: "Clinical trial",
 };

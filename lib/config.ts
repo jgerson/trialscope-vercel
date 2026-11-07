@@ -15,6 +15,7 @@ export const NS = {
   prefix: "ts-",
   trials: "ts-trials",
   pubmed: "ts-pubmed",
+  pmc: "ts-pmc", // full-text article chunks (PMC Open Access)
   patients: "ts-patients",
   patient: (id: string) => `ts-patient-${id}`,
 };

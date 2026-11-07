@@ -18,9 +18,10 @@ export function LogoMark({ size = 28 }: { size?: number }) {
   );
 }
 
-const SRC: Record<Kind, string> = { notes: "text-notes", pubmed: "text-pubmed", trials: "text-trials" };
+const SRC: Record<Kind, string> = { notes: "text-notes", pubmed: "text-pubmed", fulltext: "text-fulltext", trials: "text-trials" };
 const SRC_SOFT: Record<Kind, string> = {
-  notes: "bg-notes-soft text-notes", pubmed: "bg-pubmed-soft text-pubmed", trials: "bg-trials-soft text-trials",
+  notes: "bg-notes-soft text-notes", pubmed: "bg-pubmed-soft text-pubmed", fulltext: "bg-fulltext-soft text-fulltext",
+  trials: "bg-trials-soft text-trials",
 };
 
 export function SourceTag({ kind, label }: { kind: Kind; label?: string }) {

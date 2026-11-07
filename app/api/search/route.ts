@@ -20,6 +20,7 @@ export async function POST(req: Request) {
   const targets: { namespace: string; filter: unknown[] | null }[] = [];
   if ((body.scope === "patient" || body.scope === "all") && patient) targets.push({ namespace: NS.patient(patient.id), filter: null });
   if (body.scope === "literature" || body.scope === "all") targets.push({ namespace: NS.pubmed, filter: buildFilters("pubmed", f) });
+  if (body.scope === "fulltext" || body.scope === "all") targets.push({ namespace: NS.pmc, filter: buildFilters("fulltext", f) });
   if (body.scope === "trials" || body.scope === "all") targets.push({ namespace: NS.trials, filter: buildFilters("trials", f, patient) });
   if (!targets.length) return NextResponse.json({ error: "Pick a patient to search their notes." }, { status: 400 });
 

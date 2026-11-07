@@ -18,12 +18,14 @@ type Filter = unknown[];
 export function kindOf(namespace: string): Kind {
   if (namespace === NS.trials) return "trials";
   if (namespace === NS.pubmed) return "pubmed";
+  if (namespace === NS.pmc) return "fulltext";
   return "notes";
 }
 
 const DISPLAY: Record<Kind, string[]> = {
   trials: ["title", "summary", "nct_id", "status", "phases", "conditions", "countries", "sponsor", "start_year"],
   pubmed: ["title", "abstract", "pmid", "journal", "year", "pub_types", "topic"],
+  fulltext: ["title", "passage", "section", "section_top", "chunk", "chunks_total", "pmid", "pmcid", "journal", "year", "license"],
   notes: ["title", "body", "note_type", "visit_date", "author"],
 };
 
@@ -47,7 +49,7 @@ export function buildFilters(kind: Kind, f: SearchFilters, patient?: Patient | n
     if (f.matchPatient && patient) {
       parts.push(["min_age", "Lte", patient.age], ["max_age", "Gte", patient.age], ["sex", "In", [patient.sex, "All"]]);
     }
-  } else if (kind === "pubmed") {
+  } else if (kind === "pubmed" || kind === "fulltext") {
     if (f.yearFrom && f.yearFrom > 2015) parts.push(["year", "Gte", f.yearFrom]);
     if (f.topic) parts.push(["topic", "Eq", f.topic]);
   }
@@ -91,6 +93,12 @@ function present(kind: Kind, r: Row) {
       url: `https://pubmed.ncbi.nlm.nih.gov/${s("pmid")}/`,
     };
   }
+  if (kind === "fulltext") {
+    return {
+      title: s("title"), meta: [s("journal"), s("year")], code: s("pmcid"), body: s("passage"),
+      url: `https://pmc.ncbi.nlm.nih.gov/articles/${s("pmcid")}/`,
+    };
+  }
   const conds = ((r.conditions as string[]) ?? []).slice(0, 4).join(", ");
   return {
     title: s("title"), meta: [s("status"), ((r.phases as string[]) ?? []).join(", ")], code: s("nct_id"),
@@ -103,7 +111,10 @@ interface NsResult { run: NamespaceRun; hits: Omit<Hit, "overall" | "rrf">[] }
 async function searchNamespace(namespace: string, query: string, mode: Mode, filter: Filter | null, topK: number,
   terms: string[]): Promise<NsResult> {
   const kind = kindOf(namespace);
-  const base: Record<string, unknown> = { top_k: topK, include_attributes: DISPLAY[kind] };
+  // Full text is stored as passages; fetch extra so that after keeping the best passage per article
+  // there are still about topK articles left.
+  const fetchK = kind === "fulltext" ? Math.min(topK * 5, 100) : topK;
+  const base: Record<string, unknown> = { top_k: fetchK, include_attributes: DISPLAY[kind] };
   if (filter) base.filters = filter;
   const vec = { ...base, rank_by: ["text", "ANN", ["Embed", query]] };
   const txt = { ...base, rank_by: ["text", "BM25", query] };
@@ -148,7 +159,22 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
   });
   scored.sort((a, b) => b.fused - a.fused);
 
-  const hits = scored.slice(0, topK).map((d, i) => {
+  // Full text: collapse passages to one result per article, keeping its best passage.
+  let kept = scored;
+  const passageCount = new Map<string, number>();
+  if (kind === "fulltext") {
+    const seen = new Set<string>();
+    kept = [];
+    for (const d of scored) {
+      const art = String(d.row.pmcid ?? d.id);
+      passageCount.set(art, (passageCount.get(art) ?? 0) + 1);
+      if (seen.has(art)) continue;
+      seen.add(art);
+      kept.push(d);
+    }
+  }
+
+  const hits = kept.slice(0, topK).map((d, i) => {
     const p = present(kind, d.row);
     const visible = `${p.title} ${p.body}`.toLowerCase();
     return {
@@ -157,6 +183,11 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       snippet: p.body.length > 420 ? p.body.slice(0, 420) + "…" : p.body,
       nsRank: i + 1, fused: d.fused, vector: d.vector, bm25: d.bm25,
       terms: terms.filter((t) => new RegExp(`\\b${t.replace(/[-]/g, "\\-")}`).test(visible)),
+      ...(kind === "fulltext" ? {
+        section: d.row.section ? String(d.row.section) : null,
+        passages: passageCount.get(String(d.row.pmcid)) ?? 1,
+        chunk: Number(d.row.chunk ?? 0),
+      } : {}),
       raw: d.row as Record<string, unknown>,
     };
   });
@@ -183,7 +214,17 @@ export async function search(targets: { namespace: string; filter: Filter | null
   // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order).
   const merged = parts.flatMap((p) => p.hits.map((h) => ({ ...h, rrf: 1 / (RRF_K + h.nsRank) })));
   merged.sort((a, b) => b.rrf - a.rrf);
-  const hits: Hit[] = merged.map((h, i) => ({ ...h, overall: i + 1 }));
+  // The same paper can match as an abstract and as full text; keep whichever ranked higher.
+  const seenPmid = new Set<string>();
+  const deduped = merged.filter((h) => {
+    if (h.kind !== "pubmed" && h.kind !== "fulltext") return true;
+    const pmid = String(h.raw.pmid ?? "");
+    if (!pmid) return true;
+    if (seenPmid.has(pmid)) return false;
+    seenPmid.add(pmid);
+    return true;
+  });
+  const hits: Hit[] = deduped.map((h, i) => ({ ...h, overall: i + 1 }));
 
   return { query, mode, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
 }
@@ -240,4 +281,16 @@ export async function corpusCounts(): Promise<Record<string, number>> {
   const [trials, pubmed, patients] = await Promise.all([count(NS.trials), count(NS.pubmed), count(NS.patients)]);
   _counts = { at: Date.now(), value: { trials, pubmed, patients } };
   return _counts.value;
+}
+
+export async function readArticle(pmcid: string, around?: number, span = 1): Promise<Row[]> {
+  const filters: unknown[] = around
+    ? ["And", [["pmcid", "Eq", pmcid], ["chunk", "Gte", Math.max(1, around - span)], ["chunk", "Lte", around + span]]]
+    : ["pmcid", "Eq", pmcid];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res: any = await tp().namespace(NS.pmc).query({
+    filters, rank_by: ["chunk", "asc"], top_k: around ? span * 2 + 1 : 60,
+    include_attributes: ["title", "section", "passage", "chunk", "chunks_total", "pmid", "journal", "year"],
+  } as any);
+  return res.rows ?? [];
 }

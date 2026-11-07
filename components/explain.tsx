@@ -57,9 +57,10 @@ function RunRow({ run }: { run: NamespaceRun }) {
 /** Three columns of rank ticks: meaning, keywords and the fused result, with this document's path drawn through them. */
 function RankLadder({ hit, topK, mode }: { hit: Hit; topK: number; mode: SearchResponse["mode"] }) {
   // Meaning on the left, keywords on the right, both flowing into the fused rank in the middle.
-  const rows = Math.max(topK, hit.vector?.of ?? 0, hit.bm25?.of ?? 0, hit.nsRank);
+  // Full text fetches up to 100 passages; cap the ladder so it stays compact (deeper ranks sit at the bottom).
+  const rows = Math.min(30, Math.max(topK, hit.vector?.rank ?? 0, hit.bm25?.rank ?? 0, hit.nsRank));
   const W = 300, top = 40, gap = 12, H = top + (rows - 1) * gap + 14;
-  const y = (rank: number) => top + (rank - 1) * gap;
+  const y = (rank: number) => top + (Math.min(rank, rows) - 1) * gap;
   const center = { x: 150, label: mode === "hybrid" ? "Fused" : "Result", sig: { rank: hit.nsRank } };
   const sides = [
     ...(mode !== "bm25" ? [{ x: mode === "vector" ? 60 : 50, label: "Meaning", sig: hit.vector, side: -1 }] : []),
@@ -120,6 +121,16 @@ export function HitExplainer({ hit, data, onClose }: { hit: Hit; data: SearchRes
         <span className="text-[34px] font-bold tracking-[-0.02em] tabular-nums">#{hit.overall}</span>
         <span className="text-[13px] text-slate">overall{multi ? `, #${hit.nsRank} in ${run.short}` : ""}</span>
       </div>
+
+      {hit.kind === "fulltext" && (
+        <div className="mt-3 rounded-xl bg-fulltext-soft/60 px-3 py-2.5 text-[12.5px] leading-relaxed text-ink-2">
+          <b className="text-fulltext">Full-text passage.</b> Articles are stored as passages of about 450–600 words, split
+          within sections. The best passage came from <b className="text-ink">{hit.section ?? "the body"}</b>
+          {hit.chunk ? <> (passage {hit.chunk} of {String(hit.raw.chunks_total ?? "?")})</> : null}
+          {(hit.passages ?? 1) > 1 ? <>; {hit.passages} passages from this article matched, and only the best one counts.</> : "."}
+          {" "}Ranks below are among passages, not articles.
+        </div>
+      )}
 
       <div className="mt-3 rounded-xl border border-line px-2 pt-2 pb-1"><RankLadder hit={hit} topK={data.topK} mode={data.mode} /></div>
 

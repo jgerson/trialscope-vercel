@@ -8,12 +8,13 @@ import { HitExplainer, RunOverview } from "./explain";
 import { cx, highlight, Segmented, SourceTag } from "./ui";
 
 const EXAMPLES = ["trastuzumab cardiotoxicity monitoring", "EGFR exon 19 resistance after osimertinib",
+  "how was LVEF measured and what threshold defined cardiotoxicity",
   "pulsed field ablation for atrial fibrillation", "NCT03418961"];
 const STATUSES = ["Recruiting", "Not yet recruiting", "Active not recruiting", "Completed", "Enrolling by invitation", "Terminated"];
 const PHASES = ["Early phase 1", "Phase 1", "Phase 2", "Phase 3", "Phase 4"];
 const SCOPES: { value: Scope; label: string }[] = [
   { value: "all", label: "All" }, { value: "patient", label: "This patient" },
-  { value: "literature", label: "Literature" }, { value: "trials", label: "Trials" },
+  { value: "literature", label: "Abstracts" }, { value: "fulltext", label: "Full text" }, { value: "trials", label: "Trials" },
 ];
 const MODES: { value: Mode; label: string }[] = [{ value: "hybrid", label: "Hybrid" }, { value: "vector", label: "Vector" }, { value: "bm25", label: "BM25" }];
 
@@ -164,7 +165,15 @@ function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: strin
         <span className="ml-auto tabular-nums">#{hit.overall}</span>
       </div>
       <h3 className="mt-2 text-[16.5px] font-semibold leading-snug tracking-[-0.01em] text-ink">{highlight(hit.title, terms)}</h3>
-      <p className="mt-1.5 max-w-[82ch] text-[14px] leading-relaxed text-ink-2">{highlight(hit.snippet, terms)}</p>
+      {hit.kind === "fulltext" && hit.section && (
+        <p className="mt-1.5 text-[12.5px] text-fulltext">
+          Matched in <span className="font-semibold">{hit.section.split(" › ")[0]}</span>
+          {hit.section.includes(" › ") && <span className="text-slate"> · {hit.section.split(" › ").slice(1).join(" › ")}</span>}
+          {(hit.passages ?? 1) > 1 && <span className="text-slate"> · {hit.passages} passages matched</span>}
+        </p>
+      )}
+      <p className={cx("mt-1.5 max-w-[82ch] text-[14px] leading-relaxed text-ink-2",
+        hit.kind === "fulltext" && "border-l-2 border-fulltext-soft pl-3")}>{highlight(hit.snippet, terms)}</p>
       <div className="mt-3 flex items-center gap-5 text-[13px]">
         <button onClick={(e) => { e.stopPropagation(); onSelect(); }} aria-expanded={selected}
           className={cx("inline-flex items-center gap-1.5 font-medium", selected ? "text-accent" : "text-slate hover:text-accent")}>
@@ -173,7 +182,7 @@ function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: strin
         {hit.url && (
           <a href={hit.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
             className="inline-flex items-center gap-1 font-medium text-slate hover:text-accent">
-            Open on {hit.kind === "pubmed" ? "PubMed" : "ClinicalTrials.gov"}<ArrowUpRight size={14} />
+            Open on {hit.kind === "pubmed" ? "PubMed" : hit.kind === "fulltext" ? "PubMed Central" : "ClinicalTrials.gov"}<ArrowUpRight size={14} />
           </a>
         )}
       </div>
