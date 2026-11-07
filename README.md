@@ -53,7 +53,7 @@ With the Langfuse keys set, every copilot question and eligibility check is sent
 
 - **Copilot** (`answer-copilot-question`, an agent, tagged `copilot`): one `generate-response` generation per model
   turn with the full prompt it was sent (system prompt, tool definitions, earlier turns, tool results), the model's
-  thinking summary and tool calls, tokens and cost; a `search-sources` or `read-patient-notes` tool observation for
+  thinking summary and tool calls, tokens and cost; a `search-sources`, `read-patient-notes` or `read-article` tool observation for
   each tool call, with the filters turbopuffer applied; then `check-answer-grounding`, the source check, with its own
   generation. Questions in one copilot conversation share a session.
 - **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
@@ -89,8 +89,9 @@ npm run dev                  # http://localhost:3000
   **Details** on a save opens "What the save did": insert or update and the diff, where the time went (network,
   turbopuffer's write, embedding, then until searchable, from turbopuffer's own write report), the row and how each
   field is stored, and a search that shows where the edited note now ranks.
-- **Copilot**: Claude with two tools, `search` and `read_patient_notes`. Answers stream in, each
-  turbopuffer call is listed as it happens, and `[N1]`, `[P1]`, `[T1]` tags open source cards.
+- **Copilot**: Claude with three tools: `search`, `read_patient_notes` and `read_article` (the passages around a
+  full-text match). Answers stream in, each turbopuffer call is listed as it happens, and `[N1]`, `[P1]`, `[F1]`,
+  `[T1]` tags open source cards.
   Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
   and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
   After the answer, a **source check** (a second model call, `lib/grounding.ts`) tests each claim against the exact
