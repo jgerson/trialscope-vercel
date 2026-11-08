@@ -3,6 +3,7 @@
 // for the exporter.
 import "server-only";
 import type Anthropic from "@anthropic-ai/sdk";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { context, ROOT_CONTEXT } from "@opentelemetry/api";
 import { propagateAttributes, startObservation, type PropagateAttributesParams } from "@langfuse/tracing";
 import { ensureLangfuse } from "./langfuse-setup";
@@ -16,8 +17,14 @@ export { flushLangfuse } from "./langfuse-setup";
  */
 export function newTrace<T>(attributes: PropagateAttributesParams, fn: () => T): T {
   ensureLangfuse();
-  return context.with(ROOT_CONTEXT, () => propagateAttributes(attributes, fn));
+  return tracing.run(true, () => context.with(ROOT_CONTEXT, () => propagateAttributes(attributes, fn)));
 }
+
+// Set inside newTrace, so code below it (the turbopuffer logger) can tell a traced request from a plain page load.
+const tracing = new AsyncLocalStorage<true>();
+
+/** True when running inside a trace started by newTrace. */
+export const insideTrace = (): boolean => tracing.getStore() === true;
 
 // ---------------------------------------------------------------- Anthropic → chat format
 // Langfuse renders OpenAI-style messages as a conversation: tool calls as cards (arguments as a JSON string), tool

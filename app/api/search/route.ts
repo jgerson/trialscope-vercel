@@ -1,4 +1,6 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
+import { startActiveObservation } from "@langfuse/tracing";
+import { flushLangfuse, newTrace } from "@/lib/langfuse";
 import { NS } from "@/lib/config";
 import { getPatient } from "@/lib/patients";
 import { buildFilters, search } from "@/lib/tpuf";
@@ -27,8 +29,20 @@ export async function POST(req: Request) {
   if (body.scope === "trials" || body.scope === "all") targets.push({ namespace: NS.trials, filter: buildFilters("trials", f, patient) });
   if (!targets.length) return NextResponse.json({ error: "Pick a patient to search their notes." }, { status: 400 });
 
+  // One Langfuse trace per search (tagged "search"), with each namespace's turbopuffer call nested under it.
+  after(flushLangfuse);
   try {
-    return NextResponse.json(await search(targets, q, mode, topK));
+    const res = await newTrace({ userId: user, tags: ["search"], metadata: { scope: body.scope, mode, topK } }, () =>
+      startActiveObservation("search-page", async (obs) => {
+        obs.update({ input: { q, scope: body.scope, mode, topK, filters: f, patientId: patient?.id ?? null } });
+        const out = await search(targets, q, mode, topK);
+        obs.update({ output: { wallMs: Math.round(out.wallMs), hits: out.hits.length,
+          top: out.hits.slice(0, 10).map((h) => ({ rank: h.overall, kind: h.kind, id: h.id, title: h.title })) } });
+        return out;
+      }, { asType: "chain" }));
+    console.log(JSON.stringify({ search: "done", scope: body.scope, mode, topK, namespaces: targets.length,
+      hits: res.hits.length, wallMs: Math.round(res.wallMs) }));
+    return NextResponse.json(res);
   } catch (e) {
     return NextResponse.json({ error: `turbopuffer request failed: ${(e as Error).message}` }, { status: 502 });
   }
