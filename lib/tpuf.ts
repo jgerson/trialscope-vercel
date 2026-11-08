@@ -3,6 +3,7 @@
 import "server-only";
 import Turbopuffer from "@turbopuffer/turbopuffer";
 import { config, NS, RRF_K } from "./config";
+import { tpCall } from "./tpuf-log";
 import type { Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
@@ -156,13 +157,15 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
     if (mode === "hybrid") {
       // One request, two ranked lists back. Fused below with the same RRF formula turbopuffer's
       // rerank_by ["RRF"] uses (k=60), so each result keeps its rank in both lists for the explainer.
+      const req = { queries: [vec, txt] };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await ns.multiQuery({ queries: [vec, txt] } as any);
+      const res: any = await tpCall("multi_query", namespace, req, () => ns.multiQuery(req as any), { label: "search" });
       lists = { vector: res.results?.[0]?.rows ?? [], bm25: res.results?.[1]?.rows ?? [] };
       perf = res.performance ?? {};
     } else {
+      const req = mode === "vector" ? vec : txt;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await ns.query((mode === "vector" ? vec : txt) as any);
+      const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: "search" });
       lists = { [mode]: res.rows ?? [] };
       perf = res.performance ?? {};
     }
@@ -272,17 +275,18 @@ export async function search(targets: { namespace: string; filter: Filter | null
 // ------------------------------------------------------------------ patients and notes
 
 export async function listPatients(): Promise<Patient[]> {
+  const req = { rank_by: ["name", "asc"], top_k: 1000, include_attributes: true };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const res: any = await tp().namespace(NS.patients).query({ rank_by: ["name", "asc"], top_k: 1000, include_attributes: true } as any);
+  const res: any = await tpCall("query", NS.patients, req, () => tp().namespace(NS.patients).query(req as any), { label: "list-patients" });
   return ((res.rows ?? []) as Patient[]).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export async function listNotes(patientId: string): Promise<Note[]> {
   try {
+    const namespace = NS.patient(patientId);
+    const req = { rank_by: ["visit_date", "desc"], top_k: 200, include_attributes: DISPLAY.notes };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res: any = await tp().namespace(NS.patient(patientId)).query({
-      rank_by: ["visit_date", "desc"], top_k: 200, include_attributes: DISPLAY.notes,
-    } as any);
+    const res: any = await tpCall("query", namespace, req, () => tp().namespace(namespace).query(req as any), { label: "list-notes" });
     return (res.rows ?? []).map((r: Row) => ({ ...r, id: String(r.id) })) as Note[];
   } catch (e: unknown) {
     if ((e as { status?: number }).status === 404) return [];
@@ -309,9 +313,9 @@ export async function saveNote(patientId: string, note: Note): Promise<WriteRepo
   const tr = performance.now();
   let previous: Note | null = null;
   try {
+    const req = { filters: ["id", "Eq", note.id], top_k: 1, include_attributes: ["title", "body", "note_type", "visit_date", "author"] };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const prev: any = await ns.query({ filters: ["id", "Eq", note.id], top_k: 1,
-      include_attributes: ["title", "body", "note_type", "visit_date", "author"] } as any);
+    const prev: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: "read-previous-note" });
     const r = prev.rows?.[0];
     if (r) previous = { id: String(r.id), title: r.title ?? "", body: r.body ?? "", note_type: r.note_type ?? "", visit_date: r.visit_date ?? "", author: r.author ?? "" };
   } catch {
@@ -321,18 +325,26 @@ export async function saveNote(patientId: string, note: Note): Promise<WriteRepo
 
   const row = { ...note, text: `${note.title}\n${note.body}` };
   const t0 = performance.now();
+  const writeReq = { upsert_rows: [row], schema: NOTE_SCHEMA, distance_metric: "cosine_distance" };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const res: any = await ns.write({ upsert_rows: [row], schema: NOTE_SCHEMA, distance_metric: "cosine_distance" } as any);
+  const res: any = await tpCall("write", namespace, writeReq, () => ns.write(writeReq as any), { label: "write-note" });
   const writeMs = performance.now() - t0;
 
   // Queries are strongly consistent by default, so a fresh write should be visible straight away.
+  // Logged as one record with the number of attempts, not one line per poll.
   const t1 = performance.now();
-  for (let i = 0; i < 20; i++) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const q: any = await ns.query({ filters: ["id", "Eq", note.id], top_k: 1, include_attributes: ["title"] } as any);
-    if (q.rows?.length) break;
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  const visReq = { filters: ["id", "Eq", note.id], top_k: 1, include_attributes: ["title"] };
+  await tpCall("query", namespace, visReq, async () => {
+    let attempts = 0;
+    let found = false;
+    for (; attempts < 20 && !found; attempts++) {
+      if (attempts) await new Promise((r) => setTimeout(r, 50));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const q: any = await ns.query(visReq as any);
+      found = Boolean(q.rows?.length);
+    }
+    return { attempts, found };
+  }, { label: "wait-until-visible", extra: (r) => r });
   const visibleMs = performance.now() - t1;
 
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -353,8 +365,9 @@ let _counts: { at: number; value: Record<string, number> } | null = null;
 export async function corpusCounts(): Promise<Record<string, number>> {
   if (_counts && Date.now() - _counts.at < 10 * 60_000) return _counts.value;
   const count = async (ns: string) => {
+    const req = { aggregate_by: { c: ["Count"] } };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res: any = await tp().namespace(ns).query({ aggregate_by: { c: ["Count"] } } as any);
+    const res: any = await tpCall("query", ns, req, () => tp().namespace(ns).query(req as any), { label: "count-rows" });
     return Number(res.aggregations?.c ?? 0);
   };
   const [trials, pubmed, patients] = await Promise.all([count(NS.trials), count(NS.pubmed), count(NS.patients)]);
@@ -366,10 +379,11 @@ export async function readArticle(pmcid: string, around?: number, span = 1): Pro
   const filters: unknown[] = around
     ? ["And", [["pmcid", "Eq", pmcid], ["chunk", "Gte", Math.max(1, around - span)], ["chunk", "Lte", around + span]]]
     : ["pmcid", "Eq", pmcid];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const res: any = await tp().namespace(NS.pmc).query({
+  const req = {
     filters, rank_by: ["chunk", "asc"], top_k: around ? span * 2 + 1 : 60,
     include_attributes: ["title", "section", "passage", "chunk", "chunks_total", "pmid", "journal", "year"],
-  } as any);
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res: any = await tpCall("query", NS.pmc, req, () => tp().namespace(NS.pmc).query(req as any), { label: "read-article" });
   return res.rows ?? [];
 }

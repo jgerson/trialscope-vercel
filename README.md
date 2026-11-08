@@ -33,6 +33,7 @@ turbopuffer namespaces, so no data needs loading here.
    | `READ_ONLY` | `true` blocks note edits (optional) |
    | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
    | `LANGFUSE_BASE_URL` | your Langfuse region, e.g. `https://us.cloud.langfuse.com` (with the keys) |
+   | `LANGFUSE_TRACE_PAGE_LOADS` | `true` also sends page-load reads (patient list, notes list, row counts) to Langfuse (optional) |
 
 4. Add **Clerk** from the Vercel Marketplace and connect it to the project. It adds
    `CLERK_SECRET_KEY` and `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` for you. Who may sign up (open,
@@ -46,10 +47,27 @@ Requests, spend and latency show up under **AI Gateway → Logs**. Locally, run 
 
 Keys are only read on the server; none of them reach the browser.
 
+### Logging every turbopuffer call
+
+Every turbopuffer request goes through `tpCall` in `lib/tpuf-log.ts`, which writes one JSON line to the Vercel runtime
+logs: `{"tpuf":"search", "namespace":"ts-pubmed", "ms":..., "serverMs":..., "embeddingMs":..., "cache":"hot",
+"billedBytesQueried":..., "rows":[10,10], "top":[[id, score], ...], "request":{...}}`. Search the logs for `"tpuf"`.
+Labels are `search`, `list-patients`, `list-notes`, `read-article`, `count-rows`, and for a note save `read-previous-note`,
+`write-note` and `wait-until-visible` (the visibility polling, logged once with its attempt count). Requests are logged
+without `include_attributes`, written rows only as ids and text length, and results as ids and scores, never note text.
+Errors are logged too (a 404 just means a patient has no notes yet). With Langfuse on, each line carries the `traceId`.
+Vercel keeps runtime logs for an hour on Hobby and a day on Pro.
+
 ### Tracing with Langfuse (optional)
 
-With the Langfuse keys set, every copilot question and eligibility check is sent to
-[Langfuse](https://langfuse.com) as one trace, so the exact prompts can be read there:
+With the Langfuse keys set, every search, note save, copilot question and eligibility check is sent to
+[Langfuse](https://langfuse.com) as one trace, and every turbopuffer call inside it appears as a `turbopuffer-<label>`
+observation (a retriever for reads, a span for writes) with its request, timings, billed bytes and top results:
+
+- **Search page** (`search-page`, tagged `search`): the query, scope, mode and filters, then one `turbopuffer-search` per
+  namespace queried, and the merged top ten.
+- **Note save** (`save-note`, tagged `notes`): `turbopuffer-read-previous-note`, `turbopuffer-write-note` and
+  `turbopuffer-wait-until-visible`, with insert or update and where the time went.
 
 - **Copilot** (`answer-copilot-question`, an agent, tagged `copilot`): one `generate-response` generation per model
   turn with the full prompt it was sent (system prompt, tool definitions, earlier turns, tool results), the model's
@@ -163,6 +181,7 @@ in the Streamlit repo).
 | `app/sign-in/` | Clerk sign-in page (no sign-up page: accounts are created in Clerk's dashboard) |
 | `app/api/search`, `api/notes`, `api/copilot`, `api/eligibility` | Server routes (the copilot streams NDJSON) |
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
+| `lib/tpuf-log.ts` | Logs every turbopuffer call to Vercel logs and Langfuse |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
 | `lib/grounding.ts` | Source check: each claim tested against the text it cites |
 | `lib/eligibility.ts`, `lib/ctgov.ts`, `lib/places.ts` | Eligibility checklist, live ClinicalTrials.gov reads, site distances |
