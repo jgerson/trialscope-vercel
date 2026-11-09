@@ -31,6 +31,7 @@ turbopuffer namespaces, so no data needs loading here.
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
+   | `FULLTEXT_ENABLED` | `true` turns on full-text article search (optional; off by default) |
    | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
    | `LANGFUSE_BASE_URL` | your Langfuse region, e.g. `https://us.cloud.langfuse.com` (with the keys) |
    | `LANGFUSE_TRACE_PAGE_LOADS` | `true` also sends page-load reads (patient list, notes list, row counts) to Langfuse (optional) |
@@ -115,7 +116,8 @@ npm run dev                  # http://localhost:3000
 - **Cache warm-up**: selecting a patient asks turbopuffer to warm their namespace (`hint_cache_warm`). A dot on the
   selected patient in the sidebar shows cold, warming or warm, read from a tiny count query's cache temperature
   (checked once on selection and once more a few seconds later).
-- **Full text**: 2,000 open-access articles from PubMed Central, stored as passages and shown one
+- **Full text** (off unless `FULLTEXT_ENABLED=true`; with it off, the search page, the copilot and the corpus numbers leave
+  full text out, and the copilot is never offered the `fulltext` source or `read_article`): 2,000 open-access articles from PubMed Central, stored as passages and shown one
   result per article, labeled with the section that matched ("Matched in Methods") and how many
   passages matched. **More from this article** expands the next two best passages, and the card shows
   the stretch of the passage that best matches the question rather than its first lines. If a paper

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { config } from "@/lib/config";
 import { getPatient } from "@/lib/patients";
 import { requireUserId } from "@/lib/session";
 import { facets } from "@/lib/tpuf";
@@ -13,7 +14,7 @@ export async function POST(req: Request) {
   const user = await requireUserId();
   if (user instanceof Response) return user;
   const body = (await req.json()) as { sources?: Source[]; filters?: SearchFilters; patientId?: string };
-  const sources = ALL.filter((s) => body.sources?.includes(s));
+  const sources = ALL.filter((s) => body.sources?.includes(s) && (s !== "fulltext" || config.fulltextEnabled));
   const patient = await getPatient(body.patientId);
   try {
     return NextResponse.json({ facets: await facets(sources, body.filters ?? {}, patient ?? null) });

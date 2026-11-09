@@ -410,8 +410,9 @@ async function loadCorpusStats(): Promise<Record<string, CorpusStat>> {
     return { namespace, rows: Number(count.r.aggregations?.c ?? 0), bytes: Number.isFinite(bytes) ? bytes : null,
       countMs: Math.round(count.ms), metadataMs: Math.round(meta.ms) };
   };
-  const [trials, pubmed, fulltext] = await Promise.all([one(NS.trials), one(NS.pubmed), one(NS.pmc)]);
-  return { trials, pubmed, fulltext };
+  const [trials, pubmed, fulltext] = await Promise.all([one(NS.trials), one(NS.pubmed),
+    config.fulltextEnabled ? one(NS.pmc) : Promise.resolve(null)]);
+  return fulltext ? { trials, pubmed, fulltext } : { trials, pubmed };
 }
 
 const FACET_FIELD: Record<Source, Facet["field"]> = { trials: "status", pubmed: "topic", fulltext: "topic", notes: "note_type" };
