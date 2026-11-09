@@ -4,11 +4,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getVercelOidcToken } from "@vercel/oidc";
 import { config, NS } from "./config";
 import { buildFilters, listNotes, readArticle, search } from "./tpuf";
-import { checkGrounding } from "./grounding";
 import { startActiveObservation, startObservation, updateActiveObservation } from "@langfuse/tracing";
 import { assistantMessage, promptOf, usageOf } from "./langfuse";
 import { costOf, priceOf } from "./pricing";
-import type { GroundingItem, Hit, Mode, Patient, SearchResponse, Usage } from "./types";
+import type { Hit, Mode, Patient, SearchResponse, Usage } from "./types";
 
 const TAG: Record<Hit["kind"], string> = { notes: "N", pubmed: "P", fulltext: "F", trials: "T" };
 
@@ -90,10 +89,7 @@ export type CopilotEvent =
   | { type: "citations"; items: Record<string, Hit> }
   | { type: "error"; message: string }
   | { type: "usage"; usage: Usage }
-  | { type: "done"; seconds: number }
-  | { type: "checking" }
-  | { type: "grounding"; items: GroundingItem[]; ms: number; usage: Usage }
-  | { type: "grounding_error"; message: string };
+  | { type: "done"; seconds: number };
 
 const GATEWAY_URL = "https://ai-gateway.vercel.sh";
 
@@ -132,7 +128,7 @@ const TOOL_OBSERVATION: Record<string, string> = {
 
 /**
  * Answer one copilot question. Traced in Langfuse as an agent: a generation per model turn, a tool observation per tool
- * call (siblings, in order), then the grounding check as an evaluator.
+ * call (siblings, in order).
  */
 export async function runCopilot(
   messages: Anthropic.MessageParam[],
@@ -331,37 +327,5 @@ async function copilotLoop(
   const seconds = (performance.now() - t0) / 1000;
   emit({ type: "done", seconds });
   const result = { answer, ...used, cost, citations: Object.keys(cites).length, seconds };
-  if (!answer) return result;
-
-  // Grounding check: give a fresh model call the answer plus the exact text of each cited source, as the copilot saw it.
-  emit({ type: "checking" });
-  const tg = performance.now();
-  // Traced as an evaluator; its model call (verify-answer-claims) nests inside it.
-  await startActiveObservation("check-answer-grounding", async (check) => {
-    try {
-      const citedTags = [...new Set([...answer.matchAll(/\[([NPFT]\d+)\]/g)].map((m) => m[1]))].filter((t) => cites[t]);
-      const sources = citedTags.map((t) => ({ tag: t, text: fmt(t, cites[t]) }));
-      check.update({ input: { answer, citedTags } });
-      // The copilot was given the patient record in its system prompt, so the checker gets it too.
-      const g = await checkGrounding(llm, config.copilotModel, answer, sources, patient ? JSON.stringify(patient) : null);
-      const gCost = await costOf(config.copilotModel, g.inTokens, g.outTokens);
-      const ms = performance.now() - tg;
-      trace("grounding", { ms: Math.round(ms), claims: g.items.length,
-        flagged: g.items.filter((i) => i.verdict !== "supported").length, inTokens: g.inTokens, outTokens: g.outTokens });
-      emit({ type: "grounding", items: g.items, ms, usage: { calls: 1, inTokens: g.inTokens, outTokens: g.outTokens, cost: gCost } });
-      const count = (v: GroundingItem["verdict"]) => g.items.filter((i) => i.verdict === v).length;
-      check.update({
-        output: { claims: g.items },
-        metadata: {
-          claims: g.items.length, supported: count("supported"), partial: count("partial"),
-          unsupported: count("unsupported"), uncited: count("uncited"),
-        },
-      });
-    } catch (e) {
-      trace("grounding_error", { message: (e as Error).message.slice(0, 300) });
-      check.update({ level: "ERROR", statusMessage: (e as Error).message.slice(0, 500) });
-      emit({ type: "grounding_error", message: "The source check couldn't run for this answer." });
-    }
-  }, { asType: "evaluator" });
   return result;
 }

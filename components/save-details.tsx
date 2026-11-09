@@ -166,7 +166,7 @@ function FindIt({ note, patient, savedAt, initial }: { note: Note; patient: Pati
     try {
       const res = await fetch("/api/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q, scope: "patient", mode: "hybrid", filters: {}, topK: 10, patientId: patient.id }),
+        body: JSON.stringify({ q, sources: ["notes"], mode: "hybrid", filters: {}, topK: 10, patientId: patient.id }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? `Search failed (${res.status})`);

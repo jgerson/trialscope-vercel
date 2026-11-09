@@ -52,8 +52,9 @@ Keys are only read on the server; none of them reach the browser.
 Every turbopuffer request goes through `tpCall` in `lib/tpuf-log.ts`, which writes one JSON line to the Vercel runtime
 logs: `{"tpuf":"search", "namespace":"ts-pubmed", "ms":..., "serverMs":..., "embeddingMs":..., "cache":"hot",
 "billedBytesQueried":..., "rows":[10,10], "top":[[id, score], ...], "request":{...}}`. Search the logs for `"tpuf"`.
-Labels are `search`, `list-patients`, `list-notes`, `read-article`, `count-rows`, and for a note save `read-previous-note`,
-`write-note` and `wait-until-visible` (the visibility polling, logged once with its attempt count). Requests are logged
+Labels are `search`, `list-patients`, `list-notes`, `read-article`, `count-rows`, `namespace-metadata`, `facet-counts`,
+`cache-check`, `hint-cache-warm`, `explain-query`, `consistency-strong` and `consistency-eventual`, and for a note save
+`read-previous-note`, `write-note` and `wait-until-visible` (the visibility polling, logged once with its attempt count). Requests are logged
 without `include_attributes`, written rows only as ids and text length, and results as ids and scores, never note text.
 Errors are logged too (a 404 just means a patient has no notes yet). With Langfuse on, each line carries the `traceId`.
 Vercel keeps runtime logs for an hour on Hobby and a day on Pro.
@@ -64,16 +65,16 @@ With the Langfuse keys set, every search, note save, copilot question and eligib
 [Langfuse](https://langfuse.com) as one trace, and every turbopuffer call inside it appears as a `turbopuffer-<label>`
 observation (a retriever for reads, a span for writes) with its request, timings, billed bytes and top results:
 
-- **Search page** (`search-page`, tagged `search`): the query, scope, mode and filters, then one `turbopuffer-search` per
+- **Search page** (`search-page`, tagged `search`): the query, sources, mode and filters, then one `turbopuffer-search` per
   namespace queried, and the merged top ten.
 - **Note save** (`save-note`, tagged `notes`): `turbopuffer-read-previous-note`, `turbopuffer-write-note` and
   `turbopuffer-wait-until-visible`, with insert or update and where the time went.
-
+- **Explain** (`explain-search`, tagged `explain`): `turbopuffer-explain-query` per subquery, then
+  `turbopuffer-consistency-strong` and `turbopuffer-consistency-eventual`.
 - **Copilot** (`answer-copilot-question`, an agent, tagged `copilot`): one `generate-response` generation per model
   turn with the full prompt it was sent (system prompt, tool definitions, earlier turns, tool results), the model's
   thinking summary and tool calls, tokens and cost; a `search-sources`, `read-patient-notes` or `read-article` tool observation for
-  each tool call, with the filters turbopuffer applied; then `check-answer-grounding`, the source check, with its own
-  generation. Questions in one copilot conversation share a session.
+  each tool call, with the filters turbopuffer applied. Questions in one copilot conversation share a session.
 - **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
   `assess-eligibility-criteria` generation.
 
@@ -98,10 +99,20 @@ npm run dev                  # http://localhost:3000
 
 ## What's inside
 
-- **Search** (`/`): one search across the selected patient's notes, PubMed abstracts, full-text
-  articles and trials. Choose the sources, the retrieval mode (hybrid, vector or BM25) and filters
-  (trial status, phase, country, patient age and sex; PubMed year and topic). Links are shareable:
-  `/?q=...`.
+- **Search** (`/`): search either the selected patient's notes or any mix of PubMed abstracts, full-text
+  articles and trials (never both at once). Every source and retrieval mode (hybrid, vector or BM25) has a tooltip
+  saying where the data comes from or what the mode matches. The filters panel shows only the filters for the
+  sources being searched: note type and visit date for notes; status, phase, country and patient age and sex for
+  trials; year and topic for abstracts and full text. Filters set for a source that's turned off are kept but don't
+  apply, and the page says so. Links are shareable: `/?q=...&in=notes` or `&in=pubmed,trials`.
+- **Corpus line**: under the search box, the size of each corpus two ways: an exact row count from an aggregate
+  `Count` query, and stored bytes from the namespace's metadata, with the monthly storage cost at $0.33 per GB.
+  Hover for how each number was fetched and how long it took.
+- **Facets**: counts per trial status, per topic for abstracts and full text, or per note type, each from one
+  aggregate query with `group_by` per namespace, shown for information. The source's other active filters apply;
+  all filtering itself happens in the Filters panel.
+- **Cache warm-up**: selecting a patient asks turbopuffer to warm their namespace (`hint_cache_warm`). A dot on the
+  selected patient in the sidebar shows cold, warming or warm, read from a tiny count query's cache temperature.
 - **Full text**: 2,000 open-access articles from PubMed Central, stored as passages and shown one
   result per article, labeled with the section that matched ("Matched in Methods") and how many
   passages matched. **More from this article** expands the next two best passages, and the card shows
@@ -110,7 +121,9 @@ npm run dev                  # http://localhost:3000
 - **Explain**: select any result to see its rank by meaning and by keywords, drawn as a small
   ladder, plus its cosine distance, BM25 score, matched words, the RRF arithmetic and how it merged
   with the other sources. With nothing selected, the panel shows how the search ran: parallel
-  requests, server and embedding time, cache state and the exact request sent to turbopuffer.
+  requests, server and embedding time, cache state and the exact request sent to turbopuffer. **Query plan and
+  consistency** asks turbopuffer for its query plan (`explain_query`) for each subquery, and times the same request
+  with strong and with eventual consistency (traced in Langfuse as `explain-search`).
 - **Patient workspace** (`/patients/[id]`): notes list, a markdown editor with read and edit modes,
   and a save that reports how soon the note became searchable (usually tens of milliseconds).
   **Details** on a save opens "What the save did": insert or update and the diff, where the time went (network,
@@ -121,8 +134,7 @@ npm run dev                  # http://localhost:3000
   `[T1]` tags open source cards.
   Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
   and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
-  After the answer, a **source check** (a second model call, `lib/grounding.ts`) tests each claim against the exact
-  text of the sources it cites, and a footer shows time, tokens and approximate cost.
+  After the answer, a footer shows time, sources cited, tokens and approximate cost.
 - **Trial page** (`/trials/<NCT id>`, linked from trial results and copilot citations): reads the trial live from the
   ClinicalTrials.gov API, because the index keeps only the first 2,500 characters of eligibility criteria and no sites.
   - **Eligibility checklist**: one model call (`lib/eligibility.ts`) checks each criterion against the selected
@@ -190,7 +202,6 @@ in the Streamlit repo).
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/tpuf-log.ts` | Logs every turbopuffer call to Vercel logs and Langfuse |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
-| `lib/grounding.ts` | Source check: each claim tested against the text it cites |
 | `lib/eligibility.ts`, `lib/ctgov.ts`, `lib/places.ts` | Eligibility checklist, live ClinicalTrials.gov reads, site distances |
 | `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `instrumentation.ts` | Optional Langfuse tracing |
 | `components/` | App shell and ⌘K, search view, explain panel, workspace and save details, copilot, trial view and sites map, sign-in frame |
