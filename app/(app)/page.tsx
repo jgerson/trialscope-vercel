@@ -1,12 +1,13 @@
 import { Suspense } from "react";
 import { SearchView } from "@/components/search-view";
-import { corpusCounts } from "@/lib/tpuf";
+import { corpusStats } from "@/lib/tpuf";
+import type { CorpusStat } from "@/lib/types";
 
 export default async function SearchPage() {
-  const counts = await corpusCounts().catch(() => ({}));
+  const stats = await corpusStats().catch(() => ({} as Record<string, CorpusStat>));
   return (
     <Suspense>
-      <SearchView counts={counts as Record<string, number>} />
+      <SearchView stats={stats} />
     </Suspense>
   );
 }

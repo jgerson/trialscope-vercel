@@ -4,7 +4,7 @@ import "server-only";
 import Turbopuffer from "@turbopuffer/turbopuffer";
 import { config, NS, RRF_K } from "./config";
 import { tpCall } from "./tpuf-log";
-import type { Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, WriteReport } from "./types";
+import type { CorpusStat, Facet, Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
@@ -53,6 +53,11 @@ export function buildFilters(kind: Kind, f: SearchFilters, patient?: Patient | n
   } else if (kind === "pubmed" || kind === "fulltext") {
     if (f.yearFrom && f.yearFrom > 2015) parts.push(["year", "Gte", f.yearFrom]);
     if (f.topic) parts.push(["topic", "Eq", f.topic]);
+  } else if (kind === "notes") {
+    if (f.noteTypes?.length) parts.push(["note_type", "In", f.noteTypes]);
+    // Visit dates are stored as YYYY-MM-DD strings, which sort the same way as the dates.
+    if (f.visitFrom) parts.push(["visit_date", "Gte", f.visitFrom]);
+    if (f.visitTo) parts.push(["visit_date", "Lte", f.visitTo]);
   }
   if (!parts.length) return null;
   return parts.length === 1 ? parts[0] : ["And", parts];
@@ -362,16 +367,17 @@ export async function saveNote(patientId: string, note: Note): Promise<WriteRepo
 
 let _counts: { at: number; value: Record<string, number> } | null = null;
 
+/** Row counts for the sidebar and hero text, from corpusStats plus the patient directory. */
 export async function corpusCounts(): Promise<Record<string, number>> {
   if (_counts && Date.now() - _counts.at < 10 * 60_000) return _counts.value;
-  const count = async (ns: string) => {
-    const req = { aggregate_by: { c: ["Count"] } };
+  const req = { aggregate_by: { c: ["Count"] } };
+  const [stats, dir] = await Promise.all([
+    corpusStats(),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res: any = await tpCall("query", ns, req, () => tp().namespace(ns).query(req as any), { label: "count-rows" });
-    return Number(res.aggregations?.c ?? 0);
-  };
-  const [trials, pubmed, patients] = await Promise.all([count(NS.trials), count(NS.pubmed), count(NS.patients)]);
-  _counts = { at: Date.now(), value: { trials, pubmed, patients } };
+    tpCall("query", NS.patients, req, () => tp().namespace(NS.patients).query(req as any), { label: "count-rows" }) as Promise<any>,
+  ]);
+  _counts = { at: Date.now(), value: { trials: stats.trials.rows, pubmed: stats.pubmed.rows, fulltext: stats.fulltext.rows,
+    patients: Number(dir.aggregations?.c ?? 0) } };
   return _counts.value;
 }
 
@@ -386,4 +392,116 @@ export async function readArticle(pmcid: string, around?: number, span = 1): Pro
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const res: any = await tpCall("query", NS.pmc, req, () => tp().namespace(NS.pmc).query(req as any), { label: "read-article" });
   return res.rows ?? [];
+}
+
+// ------------------------------------------------------------------ corpus, facets, cache, explain
+
+let _stats: { at: number; value: Record<string, CorpusStat> } | null = null;
+
+/**
+ * Size of each shared corpus, two ways: an exact row count from an aggregate query, and stored bytes from the
+ * namespace's metadata (a separate API call that searches nothing). Cached for 10 minutes per server instance.
+ */
+export async function corpusStats(): Promise<Record<string, CorpusStat>> {
+  if (_stats && Date.now() - _stats.at < 10 * 60_000) return _stats.value;
+  const one = async (namespace: string): Promise<CorpusStat> => {
+    const ns = tp().namespace(namespace);
+    const req = { aggregate_by: { c: ["Count"] } };
+    const t0 = performance.now();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [count, meta]: any[] = await Promise.all([
+      tpCall("query", namespace, req, () => ns.query(req as any), { label: "count-rows" }).then((r) => ({ r, ms: performance.now() - t0 })),
+      tpCall("metadata", namespace, {}, () => ns.metadata(), { label: "namespace-metadata" }).then((r) => ({ r, ms: performance.now() - t0 })),
+    ]);
+    const bytes = Number(meta.r?.approx_logical_bytes);
+    return { namespace, rows: Number(count.r.aggregations?.c ?? 0), bytes: Number.isFinite(bytes) ? bytes : null,
+      countMs: Math.round(count.ms), metadataMs: Math.round(meta.ms) };
+  };
+  const [trials, pubmed, fulltext] = await Promise.all([one(NS.trials), one(NS.pubmed), one(NS.pmc)]);
+  _stats = { at: Date.now(), value: { trials, pubmed, fulltext } };
+  return _stats.value;
+}
+
+const FACET_FIELD: Record<Source, Facet["field"]> = { trials: "status", pubmed: "topic", fulltext: "topic", notes: "note_type" };
+
+/**
+ * Counts per value of one field for each source, one aggregate query with group_by per namespace. Each source's other
+ * active filters apply, so the counts match what a search would see; the faceted field's own filter is left out so
+ * every value stays visible.
+ */
+export async function facets(sources: Source[], f: SearchFilters, patient: Patient | null): Promise<Facet[]> {
+  const without: Record<Facet["field"], Partial<SearchFilters>> = {
+    status: { status: [] }, topic: { topic: "" }, note_type: { noteTypes: [] },
+  };
+  const jobs = sources.flatMap((source) => {
+    const namespace = source === "notes" ? (patient ? NS.patient(patient.id) : null)
+      : source === "trials" ? NS.trials : source === "pubmed" ? NS.pubmed : NS.pmc;
+    if (!namespace) return [];
+    const field = FACET_FIELD[source];
+    const filter = buildFilters(source, { ...f, ...without[field] }, patient);
+    return [{ source, namespace, field, filter }];
+  });
+  return Promise.all(jobs.map(async ({ source, namespace, field, filter }) => {
+    const req: Record<string, unknown> = { aggregate_by: { n: ["Count"] }, group_by: [field], top_k: 50 };
+    if (filter) req.filters = filter;
+    const t0 = performance.now();
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res: any = await tpCall("query", namespace, req, () => tp().namespace(namespace).query(req as any), { label: "facet-counts" });
+      const groups = ((res.aggregation_groups ?? []) as Record<string, unknown>[])
+        .map((g) => ({ value: String(g[field] ?? ""), count: Number(g.n ?? 0) }))
+        .filter((g) => g.value && g.count)
+        .sort((a, b) => b.count - a.count);
+      return { source, namespace, field, groups, ms: Math.round(performance.now() - t0) };
+    } catch (e) {
+      if ((e as { status?: number }).status === 404) return { source, namespace, field, groups: [], ms: 0 };
+      throw e;
+    }
+  }));
+}
+
+/**
+ * Cache state of a patient's namespace, read from a tiny count query (eventual consistency, so it doesn't wait on object
+ * storage). If it isn't warm and `warm` is set, ask turbopuffer to start loading it into cache.
+ */
+export async function patientCache(patientId: string, warm: boolean): Promise<{ state: "warm" | "warming" | "cold"; temperature: string | null; ms: number }> {
+  const namespace = NS.patient(patientId);
+  const ns = tp().namespace(namespace);
+  const req = { aggregate_by: { c: ["Count"] }, consistency: { level: "eventual" } };
+  const t0 = performance.now();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: "cache-check" });
+  const temperature = typeof res.performance?.cache_temperature === "string" ? res.performance.cache_temperature : null;
+  const ms = Math.round(performance.now() - t0);
+  if (temperature === "hot" || temperature === "warm") return { state: "warm", temperature, ms };
+  if (!warm) return { state: "cold", temperature, ms };
+  await tpCall("warm", namespace, {}, () => ns.hintCacheWarm(), { label: "hint-cache-warm" });
+  return { state: "warming", temperature, ms };
+}
+
+/**
+ * For one search request as the Explain panel shows it: turbopuffer's query plan for each subquery, and the same
+ * request timed with strong and with eventual consistency.
+ */
+export async function explainRun(namespace: string, request: Record<string, unknown>) {
+  const ns = tp().namespace(namespace);
+  const subqueries = Array.isArray(request.queries) ? (request.queries as Record<string, unknown>[]) : [request];
+  const plans = await Promise.all(subqueries.map((q) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tpCall("explain", namespace, q, () => ns.explainQuery(q as any), { label: "explain-query" })
+      .then((r) => String((r as { plan_text?: string }).plan_text ?? ""))));
+  const timed = async (level: "strong" | "eventual") => {
+    const req = { ...request, consistency: { level } };
+    const multi = Array.isArray(request.queries);
+    const t0 = performance.now();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res: any = await tpCall(multi ? "multi_query" : "query", namespace, req,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (): Promise<unknown> => (multi ? ns.multiQuery(req as any) : ns.query(req as any)), { label: `consistency-${level}` });
+    return { level, roundMs: Math.round(performance.now() - t0), serverMs: res.performance?.server_total_ms ?? null };
+  };
+  // One after the other, so the two timings don't compete for the same connection.
+  const strong = await timed("strong");
+  const eventual = await timed("eventual");
+  return { plans, strong, eventual };
 }

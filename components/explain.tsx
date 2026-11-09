@@ -1,6 +1,6 @@
 "use client";
 // The right-hand panel: how the search ran, or why one result ranked where it did.
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ArrowUpRight, X } from "lucide-react";
 import type { Hit, NamespaceRun, SearchResponse } from "@/lib/types";
 import { cx, SourceTag } from "./ui";
@@ -21,14 +21,14 @@ export function RunOverview({ data }: { data: SearchResponse }) {
       </div>
       <p className="mt-1 text-[13px] leading-relaxed text-slate">{how}{n > 1 ? " Results from each source are then merged by rank." : ""}</p>
       <div className="mt-4 divide-y divide-line">
-        {data.runs.map((r) => <RunRow key={r.namespace} run={r} />)}
+        {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} />)}
       </div>
       <p className="mt-4 text-[12.5px] text-slate">Select a result to see why it ranked where it did.</p>
     </div>
   );
 }
 
-function RunRow({ run }: { run: NamespaceRun }) {
+function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"] }) {
   return (
     <div className="py-3">
       <div className="flex items-baseline gap-2">
@@ -51,6 +51,64 @@ function RunRow({ run }: { run: NamespaceRun }) {
           {JSON.stringify(run.request, null, 2)}
         </pre>
       </details>
+      {run.request != null && <PlanAndConsistency run={run} mode={mode} />}
+    </div>
+  );
+}
+
+type Explained = { plans: string[]; strong: { roundMs: number; serverMs: number | null }; eventual: { roundMs: number; serverMs: number | null } };
+
+/**
+ * On request: turbopuffer's own query plan for this search, and the same search timed with strong and eventual
+ * consistency. Strong (the default) checks object storage for the latest writes first; eventual skips that check.
+ */
+function PlanAndConsistency({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"] }) {
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [out, setOut] = useState<Explained | null>(null);
+  const go = async () => {
+    setState("loading");
+    try {
+      const r = await fetch("/api/explain", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ namespace: run.namespace, request: run.request }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      setOut(j); setState("idle");
+    } catch {
+      setState("error");
+    }
+  };
+  const labels = mode === "hybrid" ? ["Vector subquery", "BM25 subquery"] : [mode === "vector" ? "Vector query" : "BM25 query"];
+  if (!out) {
+    return (
+      <button type="button" onClick={go} disabled={state === "loading"}
+        className="mt-1.5 block text-[12.5px] text-slate underline decoration-dotted underline-offset-2 hover:text-ink disabled:opacity-60">
+        {state === "loading" ? "Asking turbopuffer…" : state === "error" ? "Couldn't load. Try again" : "Query plan and consistency"}
+      </button>
+    );
+  }
+  const row = (label: string, t: Explained["strong"]) => (
+    <tr><td className="py-0.5 pr-3 text-ink-2">{label}</td><td className="py-0.5 pr-3 text-right tabular-nums">{t.serverMs ?? "–"} ms</td>
+      <td className="py-0.5 text-right tabular-nums text-slate">{t.roundMs} ms</td></tr>
+  );
+  return (
+    <div className="mt-2 space-y-2.5 rounded-lg border border-line p-3">
+      <div>
+        <p className="text-[12.5px] font-semibold text-ink">Consistency</p>
+        <table className="mt-1 w-full text-[12.5px]">
+          <thead><tr className="text-slate"><th className="pr-3 text-left font-normal" /><th className="pr-3 text-right font-normal">server</th><th className="text-right font-normal">round trip</th></tr></thead>
+          <tbody>{row("Strong (default)", out.strong)}{row("Eventual", out.eventual)}</tbody>
+        </table>
+        <p className="mt-1 text-[12px] leading-relaxed text-slate">
+          Strong checks object storage for the newest writes first, so a just-saved note always shows up. Eventual skips that
+          check and can be faster, but may miss writes from the last moment. Run once each, just now, so expect some noise.
+        </p>
+      </div>
+      {out.plans.map((plan, i) => (
+        <details key={i} className="group" open={i === 0}>
+          <summary className="cursor-pointer text-[12.5px] font-semibold text-ink">Query plan: {labels[i] ?? `Subquery ${i + 1}`}</summary>
+          <pre className="mt-1.5 max-h-64 overflow-auto rounded-lg bg-paper p-3 font-mono text-[11px] leading-snug text-ink-2">{plan}</pre>
+        </details>
+      ))}
     </div>
   );
 }

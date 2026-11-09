@@ -16,7 +16,7 @@ import { getActiveTraceId, startActiveObservation } from "@langfuse/tracing";
 import { langfuseEnabled } from "./langfuse-setup";
 import { flushLangfuse, insideTrace, newTrace } from "./langfuse";
 
-export type TpufOp = "query" | "multi_query" | "write";
+export type TpufOp = "query" | "multi_query" | "write" | "metadata" | "warm" | "explain";
 
 type Opts<T> = {
   /** Short name for the call, e.g. "search" or "list-notes". Becomes the log key and the observation name. */
@@ -127,8 +127,16 @@ function summarize(op: TpufOp, res: any): Record<string, unknown> {
   } else if (op === "multi_query") {
     const lists = ((res.results ?? []) as { rows?: Record<string, unknown>[] }[]).map((r) => r.rows ?? []);
     Object.assign(out, { rows: lists.map((l) => l.length), top: lists.map(top) });
+  } else if (res.aggregation_groups) {
+    out.groups = (res.aggregation_groups as unknown[]).length;
   } else if (res.aggregations) {
     out.aggregations = res.aggregations;
+  } else if (op === "metadata") {
+    Object.assign(out, { approxRows: num(res.approx_row_count), approxBytes: num(res.approx_logical_bytes) });
+  } else if (op === "warm") {
+    out.status = res.status;
+  } else if (op === "explain") {
+    out.planChars = typeof res.plan_text === "string" ? res.plan_text.length : undefined;
   } else if (Array.isArray(res.rows)) {
     Object.assign(out, { rows: res.rows.length, top: top(res.rows) });
   }

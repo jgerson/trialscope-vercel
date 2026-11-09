@@ -38,19 +38,39 @@ export function SourcePill({ kind, children }: { kind: Kind; children: React.Rea
 }
 
 export function Segmented<T extends string>({ label, value, options, onChange }: {
-  label: string; value: T; options: { value: T; label: string }[]; onChange: (v: T) => void;
+  label: string; value: T; options: { value: T; label: string; hint?: string }[]; onChange: (v: T) => void;
 }) {
+  // With hints, the group wraps instead of scrolling so the tooltips aren't clipped.
+  const hinted = options.some((o) => o.hint);
   return (
     <div role="radiogroup" aria-label={label}
-      className="inline-flex max-w-full overflow-x-auto rounded-lg border border-line bg-surface p-0.5 [scrollbar-width:none]">
-      {options.map((o) => (
-        <button key={o.value} type="button" role="radio" aria-checked={value === o.value} onClick={() => onChange(o.value)}
-          className={cx("shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
-            value === o.value ? "bg-ink text-white" : "text-slate hover:text-ink")}>
-          {o.label}
-        </button>
-      ))}
+      className={cx("inline-flex max-w-full rounded-lg border border-line bg-surface p-0.5",
+        hinted ? "flex-wrap" : "overflow-x-auto [scrollbar-width:none]")}>
+      {options.map((o) => {
+        const button = (
+          <button key={o.value} type="button" role="radio" aria-checked={value === o.value} onClick={() => onChange(o.value)}
+            className={cx("shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
+              value === o.value ? "bg-ink text-white" : "text-slate hover:text-ink")}>
+            {o.label}
+          </button>
+        );
+        return o.hint ? <Tip key={o.value} text={o.hint}>{button}</Tip> : button;
+      })}
     </div>
+  );
+}
+
+/** A small tooltip shown on hover, and on focus so a tap on a phone shows it too. */
+export function Tip({ text, children, align = "center" }: { text: React.ReactNode; children: React.ReactNode; align?: "center" | "left" }) {
+  return (
+    <span className="group/tip relative inline-flex">
+      {children}
+      <span role="tooltip"
+        className={cx("pointer-events-none absolute top-full z-40 mt-2 w-max max-w-[280px] rounded-lg bg-ink px-3 py-2 text-left text-[12px] leading-snug font-normal text-white opacity-0 shadow-pop transition-opacity delay-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100",
+          align === "center" ? "left-1/2 -translate-x-1/2" : "left-0")}>
+        {text}
+      </span>
+    </span>
   );
 }
 

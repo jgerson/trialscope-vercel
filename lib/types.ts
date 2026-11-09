@@ -2,7 +2,8 @@
 
 export type Kind = "notes" | "pubmed" | "fulltext" | "trials";
 export type Mode = "hybrid" | "vector" | "bm25";
-export type Scope = "patient" | "literature" | "fulltext" | "trials" | "all";
+/** A searchable source. "notes" is the selected patient's own namespace; the others are shared corpora. */
+export type Source = "notes" | "pubmed" | "fulltext" | "trials";
 
 export interface Patient {
   id: string;
@@ -80,6 +81,27 @@ export interface SearchFilters {
   matchPatient?: boolean;
   yearFrom?: number;
   topic?: "oncology" | "cardiology" | "";
+  noteTypes?: string[];
+  visitFrom?: string; // YYYY-MM-DD
+  visitTo?: string;
+}
+
+/** One corpus: exact rows from an aggregate Count query, stored size from namespace metadata. */
+export interface CorpusStat {
+  namespace: string;
+  rows: number;
+  bytes: number | null;
+  countMs: number;
+  metadataMs: number;
+}
+
+/** Counts grouped by one field, from one aggregate query with group_by. */
+export interface Facet {
+  source: Source;
+  namespace: string;
+  field: "status" | "topic" | "note_type";
+  groups: { value: string; count: number }[];
+  ms: number;
 }
 
 export interface SearchResponse {

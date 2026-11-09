@@ -3,28 +3,45 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUpRight, ClipboardCheck, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
-import type { Hit, Mode, Scope, SearchFilters, SearchResponse } from "@/lib/types";
+import type { CorpusStat, Facet, Hit, Mode, Patient, SearchFilters, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { HitExplainer, RunOverview } from "./explain";
-import { cx, highlight, Segmented, SourceTag } from "./ui";
+import { cx, highlight, Segmented, SourceTag, Tip } from "./ui";
 
 const EXAMPLES = ["trastuzumab cardiotoxicity monitoring", "EGFR exon 19 resistance after osimertinib",
   "how was LVEF measured and what threshold defined cardiotoxicity",
   "pulsed field ablation for atrial fibrillation", "NCT03418961"];
 const STATUSES = ["Recruiting", "Not yet recruiting", "Active not recruiting", "Completed", "Enrolling by invitation", "Terminated"];
 const PHASES = ["Early phase 1", "Phase 1", "Phase 2", "Phase 3", "Phase 4"];
-const SCOPES: { value: Scope; label: string }[] = [
-  { value: "all", label: "All" }, { value: "patient", label: "Patient notes" },
-  { value: "literature", label: "Abstracts" }, { value: "fulltext", label: "Full text" }, { value: "trials", label: "Trials" },
+const NOTE_TYPES = ["Visit note", "Result", "Phone call", "Treatment plan", "Other"];
+const LITERATURE: Source[] = ["pubmed", "fulltext", "trials"];
+const LIT_LABEL: Record<Source, string> = { notes: "Patient notes", pubmed: "Abstracts", fulltext: "Full text", trials: "Trials" };
+const MODES: { value: Mode; label: string; hint: string }[] = [
+  { value: "hybrid", label: "Hybrid", hint: "Runs a meaning search and a keyword search in one request and merges the two ranked lists (reciprocal rank fusion). The best default." },
+  { value: "vector", label: "Vector", hint: "Matches meaning: turbopuffer embeds your words and finds the closest documents, so it catches paraphrases and synonyms." },
+  { value: "bm25", label: "BM25", hint: "Matches exact words, weighting rare ones more. Best for drug names, genes and trial ids." },
 ];
-const MODES: { value: Mode; label: string }[] = [{ value: "hybrid", label: "Hybrid" }, { value: "vector", label: "Vector" }, { value: "bm25", label: "BM25" }];
 
-export function SearchView({ counts }: { counts: Record<string, number> }) {
+type Area = "notes" | "literature";
+
+/** Sources from the URL: `in=notes` or `in=pubmed,trials`; older links use `scope`. */
+function initialSources(params: URLSearchParams): { area: Area; lit: Source[] } {
+  const inParam = params.get("in");
+  if (inParam === "notes" || params.get("scope") === "patient") return { area: "notes", lit: LITERATURE };
+  const picked = (inParam ?? "").split(",").filter((s): s is Source => LITERATURE.includes(s as Source));
+  if (picked.length) return { area: "literature", lit: picked };
+  const legacy = ({ literature: ["pubmed"], fulltext: ["fulltext"], trials: ["trials"] } as Record<string, Source[]>)[params.get("scope") ?? ""];
+  return { area: "literature", lit: legacy ?? LITERATURE };
+}
+
+const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`);
+
+export function SearchView({ stats }: { stats: Record<string, CorpusStat> }) {
   const params = useSearchParams();
   const router = useRouter();
   const { patient } = useApp();
   const [input, setInput] = useState(params.get("q") ?? "");
-  const [scope, setScope] = useState<Scope>((params.get("scope") as Scope) || "all");
+  const [{ area, lit }, setSources] = useState(() => initialSources(params));
   const [mode, setMode] = useState<Mode>((params.get("mode") as Mode) || "hybrid");
   const [filters, setFilters] = useState<SearchFilters>({});
   const [topK, setTopK] = useState(10);
@@ -32,7 +49,10 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [facetList, setFacetList] = useState<Facet[]>([]);
   const q = params.get("q") ?? "";
+  const sources: Source[] = area === "notes" ? ["notes"] : lit;
+  const sourcesKey = sources.join(",");
 
   const run = useCallback(async (query: string) => {
     if (!query.trim()) { setData(null); return; }
@@ -40,7 +60,7 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
     try {
       const res = await fetch("/api/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: query, scope, mode, filters, topK, patientId: patient?.id }),
+        body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, filters, topK, patientId: patient?.id }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Search failed.");
@@ -50,21 +70,43 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
     } finally {
       setLoading(false);
     }
-  }, [scope, mode, filters, topK, patient?.id]);
+  }, [sourcesKey, mode, filters, topK, patient?.id]);
 
   // Re-run whenever the query in the URL or any control changes.
   useEffect(() => { setInput(q); run(q); }, [q, run]);
 
+  // Facet counts for the sources being searched, with the other active filters applied.
+  useEffect(() => {
+    if (area === "notes" && !patient) { setFacetList([]); return; }
+    const ctl = new AbortController();
+    fetch("/api/facets", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
+      body: JSON.stringify({ sources: sourcesKey.split(","), filters, patientId: patient?.id }),
+    }).then((r) => r.json()).then((j) => setFacetList(j.facets ?? [])).catch(() => {});
+    return () => ctl.abort();
+  }, [area, sourcesKey, filters, patient?.id]);
+
   const submit = (text: string) => {
     const sp = new URLSearchParams({ q: text.trim() });
-    if (scope !== "all") sp.set("scope", scope);
+    if (area === "notes") sp.set("in", "notes");
+    else if (lit.length < LITERATURE.length) sp.set("in", lit.join(","));
     if (mode !== "hybrid") sp.set("mode", mode);
     router.replace(`/?${sp.toString()}`, { scroll: false });
   };
 
+  const toggleLit = (s: Source) => setSources(({ lit: cur }) => {
+    const next = cur.includes(s) ? cur.filter((x) => x !== s) : LITERATURE.filter((x) => x === s || cur.includes(x));
+    return { area: "literature", lit: next.length ? next : cur }; // at least one stays on
+  });
+
   const hit = data?.hits.find((h) => h.key === selected) ?? null;
-  const activeFilters = [filters.status?.length, filters.phases?.length, filters.country, filters.matchPatient,
-    (filters.yearFrom ?? 2015) > 2015, filters.topic].filter(Boolean).length;
+  const groups = filterGroups(filters);
+  const activeFilters = sources.reduce((n, s) => n + (groups[s] ?? 0), 0) + (sources.includes("fulltext") && sources.includes("pubmed") ? -groups.pubmed : 0);
+  const idle = Object.entries(groups).filter(([s, n]) => n && !sources.includes(s as Source)).map(([s]) => LIT_LABEL[s as Source]);
+  const idleNames = [...new Set(idle.map((n) => (n === "Abstracts" || n === "Full text" ? "abstracts and full text" : n.toLowerCase())))];
+
+  const notesLabel = patient ? `${patient.name.split(" ")[0]}'s notes` : "Patient notes";
+  const corpusTotal = ["pubmed", "fulltext", "trials"].reduce((n, k) => n + (stats[k]?.bytes ?? 0), 0);
 
   return (
     <div className="mx-auto max-w-[1360px] px-5 pb-20 sm:px-8 lg:px-10">
@@ -72,12 +114,11 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
         {!q && (
           <div className="mb-8 max-w-[760px]">
             <h1 className="font-display text-[clamp(44px,6.5vw,84px)] leading-[0.95] tracking-tight text-ink text-balance">
-              Search the chart and <em className="italic text-slate">the literature</em> at once.
+              Search the chart or <em className="italic text-slate">the literature</em>.
             </h1>
             <p className="mt-4 max-w-[62ch] text-[16px] leading-relaxed text-slate">
-              {patient ? `${patient.name}'s notes, ` : "Patient notes, "}
-              {counts.pubmed ? `${counts.pubmed.toLocaleString()} PubMed abstracts and ${counts.trials.toLocaleString()} clinical trials` : "PubMed and clinical trials"},
-              {" "}ranked together by turbopuffer. Exact terms match on keywords, questions match on meaning.
+              A patient’s own notes, or PubMed, full-text articles and clinical trials, ranked by turbopuffer. Exact terms
+              match on keywords, questions match on meaning.
             </p>
           </div>
         )}
@@ -85,19 +126,53 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
         <form onSubmit={(e) => { e.preventDefault(); submit(input); }} className="group relative max-w-[980px]">
           <Search className="pointer-events-none absolute top-1/2 left-5 -translate-y-1/2 text-slate" size={20} />
           <input value={input} onChange={(e) => setInput(e.target.value)} aria-label="Search"
-            placeholder="A drug, a gene, a trial ID or a clinical question"
+            placeholder={area === "notes" ? `Search ${patient ? `${patient.name}'s` : "a patient's"} notes` : "A drug, a gene, a trial ID or a clinical question"}
             className="h-[60px] w-full rounded-2xl border border-line bg-surface pr-28 pl-14 text-[17px] text-ink transition placeholder:text-slate/70 focus:border-ink focus:ring-4 focus:ring-ink/5 focus:outline-none" />
           <button type="submit" className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded-xl bg-ink px-4 py-2.5 text-[14px] font-semibold text-white hover:bg-ink-2">
             {loading ? <Loader2 size={17} className="animate-spin" /> : "Search"}
           </button>
         </form>
 
+        <CorpusLine area={area} patient={patient} stats={stats} total={corpusTotal} />
+
         <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3">
-          <Segmented label="Search in" value={scope} onChange={setScope}
-            options={SCOPES.map((o) => (o.value === "patient" && patient ? { ...o, label: `${patient.name.split(" ")[0]}'s notes` } : o))} />
+          <Segmented label="Search" value={area} onChange={(a) => setSources(({ lit: cur }) => ({ area: a, lit: cur }))} options={[
+            { value: "notes", label: notesLabel, hint: patient
+              ? `Only ${patient.name}'s chart notes, in their own turbopuffer namespace (ts-patient-${patient.id}). Synthetic, written by a script.`
+              : "Pick a patient on the left to search their chart notes. Each patient has their own turbopuffer namespace." },
+            { value: "literature", label: "Literature and trials", hint: "Public medical literature and trials. Pick any mix of abstracts, full text and trials." },
+          ]} />
+          {area === "literature" && (
+            <div role="group" aria-label="Sources" className="inline-flex flex-wrap gap-1.5">
+              {LITERATURE.map((s) => (
+                <Tip key={s} text={sourceHint(s, stats)}>
+                  <button type="button" aria-pressed={lit.includes(s)} onClick={() => toggleLit(s)}
+                    className={cx("inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-medium",
+                      lit.includes(s) ? "border-ink bg-ink text-white" : "border-line bg-surface text-slate hover:text-ink")}>
+                    <span aria-hidden className={cx("size-1.5 rounded-full", { pubmed: "bg-pubmed", fulltext: "bg-fulltext", trials: "bg-trials", notes: "bg-notes" }[s],
+                      lit.includes(s) && "ring-2 ring-white/70")} />
+                    {LIT_LABEL[s]}
+                  </button>
+                </Tip>
+              ))}
+            </div>
+          )}
           <Segmented label="Retrieval" value={mode} options={MODES} onChange={setMode} />
-          <FiltersButton filters={filters} setFilters={setFilters} topK={topK} setTopK={setTopK} active={activeFilters} hasPatient={!!patient} />
+          <FiltersButton filters={filters} setFilters={setFilters} topK={topK} setTopK={setTopK} active={activeFilters}
+            sources={sources} patient={patient} />
         </div>
+
+        {idleNames.length > 0 && (
+          <p className="mt-2 text-[12.5px] text-slate">
+            Filters for {idleNames.join(" and ")} are set but don’t apply, because {idleNames.length > 1 ? "those sources are" : "that source is"} off.
+          </p>
+        )}
+
+        <FacetRow facets={facetList} filters={filters} setFilters={setFilters} />
+
+        {area === "notes" && !patient && (
+          <p className="mt-4 rounded-xl border border-line bg-surface px-4 py-3 text-[13.5px] text-slate">Pick a patient on the left to search their notes.</p>
+        )}
 
         {!q && (
           <div className="mt-10">
@@ -127,7 +202,7 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
             </div>
             <div className={cx("mt-4 space-y-2.5 transition-opacity", loading && data && "opacity-50")}>
               {!data && loading && Array.from({ length: 4 }, (_, i) => <SkeletonCard key={i} />)}
-              {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try fewer filters or a different scope.</p>}
+              {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try fewer filters or different sources.</p>}
               {data?.hits.map((h) => (
                 <ResultCard key={h.key} hit={h} terms={data.hits.length ? queryWords(data.query) : []}
                   selected={h.key === selected} onSelect={() => setSelected(h.key === selected ? null : h.key)} />
@@ -145,6 +220,97 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function sourceHint(s: Source, stats: Record<string, CorpusStat>) {
+  const n = (k: string) => (stats[k]?.rows ? stats[k].rows.toLocaleString() : null);
+  return {
+    pubmed: `${n("pubmed") ?? "About 71,000"} oncology and cardiology abstracts from PubMed (U.S. National Library of Medicine), 2015 onward.`,
+    fulltext: `${n("fulltext") ?? "About 22,700"} passages from 2,000 open-access articles in PubMed Central, 2024 onward, shown one result per article.`,
+    trials: `${n("trials") ?? "About 49,400"} interventional studies from ClinicalTrials.gov, most recently updated first.`,
+    notes: "",
+  }[s];
+}
+
+/** How many filters are set per source. Abstracts and full text share theirs. */
+function filterGroups(f: SearchFilters): Record<Source, number> {
+  const lit = [(f.yearFrom ?? 2015) > 2015, f.topic].filter(Boolean).length;
+  return {
+    trials: [f.status?.length, f.phases?.length, f.country, f.matchPatient].filter(Boolean).length,
+    pubmed: lit, fulltext: lit,
+    notes: [f.noteTypes?.length, f.visitFrom, f.visitTo].filter(Boolean).length,
+  };
+}
+
+/** One quiet line: what's being searched and how big it is. Hover for how each number was fetched. */
+function CorpusLine({ area, patient, stats, total }: {
+  area: Area; patient: Patient | null; stats: Record<string, CorpusStat>; total: number;
+}) {
+  if (area === "notes") {
+    return (
+      <p className="mt-2.5 text-[12.5px] text-slate">
+        {patient ? <>Searching only {patient.name}’s notes, in namespace <span className="font-mono">ts-patient-{patient.id}</span>.</> : "No patient selected."}
+      </p>
+    );
+  }
+  if (!stats.pubmed) return null;
+  const rows: [string, string][] = [["pubmed", "abstracts"], ["fulltext", "full-text passages"], ["trials", "trials"]];
+  return (
+    <div className="mt-2.5 text-[12.5px] text-slate">
+      <Tip align="left" text={
+        <span className="block space-y-1.5">
+          {rows.map(([k, label]) => stats[k] && (
+            <span key={k} className="block">
+              <b className="font-semibold">{stats[k].namespace}</b>: {stats[k].rows.toLocaleString()} {label} from an aggregate Count
+              query ({stats[k].countMs} ms){stats[k].bytes != null && <>; {gb(stats[k].bytes!)} stored, from namespace metadata ({stats[k].metadataMs} ms), about
+              ${(stats[k].bytes! / 1e9 * 0.33).toFixed(2)} a month at $0.33 per GB</>}.
+            </span>
+          ))}
+          <span className="block text-white/70">Refreshed every 10 minutes.</span>
+        </span>
+      }>
+        <button type="button" className="inline-flex items-center gap-1.5 text-left hover:text-ink">
+          <Info size={13} aria-hidden />
+          {rows.map(([k, label]) => `${(stats[k]?.rows ?? 0).toLocaleString()} ${label}`).join(" · ")}
+          {total > 0 && ` · ${gb(total)} stored`}
+        </button>
+      </Tip>
+    </div>
+  );
+}
+
+const FACET_LABEL: Record<Facet["source"], string> = { trials: "Trials by status", pubmed: "Abstracts by topic", fulltext: "Full text by topic", notes: "Notes by type" };
+
+/** Counts per value from one grouped aggregate query per source. Clicking a count applies it as a filter. */
+function FacetRow({ facets, filters, setFilters }: { facets: Facet[]; filters: SearchFilters; setFilters: (f: SearchFilters) => void }) {
+  const shown = facets.filter((f) => f.groups.length);
+  if (!shown.length) return null;
+  const isOn = (f: Facet, v: string) =>
+    f.field === "status" ? !!filters.status?.includes(v) : f.field === "topic" ? filters.topic === v : !!filters.noteTypes?.includes(v);
+  const toggle = (f: Facet, v: string) => {
+    if (f.field === "topic") return setFilters({ ...filters, topic: filters.topic === v ? "" : (v as SearchFilters["topic"]) });
+    const key = f.field === "status" ? "status" : "noteTypes";
+    const cur = filters[key] ?? [];
+    setFilters({ ...filters, [key]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v] });
+  };
+  return (
+    <div className="mt-3 flex flex-col gap-1.5">
+      {shown.map((f) => (
+        <div key={f.source} className="flex flex-wrap items-center gap-1.5 text-[12.5px]">
+          <Tip align="left" text={`One aggregate query with group_by ["${f.field}"] on ${f.namespace}, ${f.ms} ms. Other active filters apply. Click a count to filter by it.`}>
+            <span tabIndex={0} className="mr-1 cursor-help text-slate underline decoration-dotted underline-offset-2">{FACET_LABEL[f.source]}</span>
+          </Tip>
+          {f.groups.slice(0, 8).map((g) => (
+            <button key={g.value} type="button" aria-pressed={isOn(f, g.value)} onClick={() => toggle(f, g.value)}
+              className={cx("rounded-full border px-2.5 py-0.5",
+                isOn(f, g.value) ? "border-ink bg-ink text-white" : "border-line bg-surface text-ink-2 hover:border-line-2")}>
+              {g.value[0].toUpperCase() + g.value.slice(1)} <span className={cx("tabular-nums", isOn(f, g.value) ? "text-white/75" : "text-slate")}>{g.count.toLocaleString()}</span>
+            </button>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -231,9 +397,9 @@ function SkeletonCard() {
   );
 }
 
-function FiltersButton({ filters, setFilters, topK, setTopK, active, hasPatient }: {
+function FiltersButton({ filters, setFilters, topK, setTopK, active, sources, patient }: {
   filters: SearchFilters; setFilters: (f: SearchFilters) => void; topK: number; setTopK: (n: number) => void;
-  active: number; hasPatient: boolean;
+  active: number; sources: Source[]; patient: Patient | null;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(filters);
@@ -245,12 +411,24 @@ function FiltersButton({ filters, setFilters, topK, setTopK, active, hasPatient 
     document.addEventListener("mousedown", close); document.addEventListener("keydown", esc);
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc); };
   }, [open]);
-  const toggle = (key: "status" | "phases", v: string) => {
+  const toggle = (key: "status" | "phases" | "noteTypes", v: string) => {
     const cur = draft[key] ?? [];
     setDraft({ ...draft, [key]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v] });
   };
   const chip = (on: boolean) => cx("rounded-full border px-3 py-1 text-[12.5px]",
     on ? "border-ink bg-ink text-white" : "border-line text-ink-2 hover:border-line-2");
+  const notes = sources.includes("notes");
+  const trials = sources.includes("trials");
+  const lit = sources.includes("pubmed") || sources.includes("fulltext");
+  const litName = sources.includes("pubmed") && sources.includes("fulltext") ? "Abstracts and full text" : sources.includes("pubmed") ? "Abstracts" : "Full text";
+  // Only the filters for the sources being searched are cleared; the rest are kept for when those sources come back.
+  const cleared: SearchFilters = {
+    ...draft,
+    ...(notes ? { noteTypes: [], visitFrom: "", visitTo: "" } : {}),
+    ...(trials ? { status: [], phases: [], country: "", matchPatient: false } : {}),
+    ...(lit ? { yearFrom: 2015, topic: "" } : {}),
+  };
+  const date = "mt-1.5 block w-full rounded-lg border border-line px-3 py-1.5 text-[13.5px] text-ink focus:border-accent focus:outline-none";
 
   return (
     <div ref={ref} className="relative">
@@ -261,35 +439,51 @@ function FiltersButton({ filters, setFilters, topK, setTopK, active, hasPatient 
       </button>
       {open && (
         <div className="absolute top-full left-0 z-30 mt-2 w-[min(92vw,420px)] animate-fade-in rounded-2xl border border-line bg-surface p-5 shadow-pop">
-          <h3 className="text-[13px] font-semibold text-ink">Clinical trials</h3>
-          <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Status</p>
-          <div className="flex flex-wrap gap-1.5">{STATUSES.map((s) => <button key={s} className={chip(!!draft.status?.includes(s))} onClick={() => toggle("status", s)}>{s}</button>)}</div>
-          <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Phase</p>
-          <div className="flex flex-wrap gap-1.5">{PHASES.map((s) => <button key={s} className={chip(!!draft.phases?.includes(s))} onClick={() => toggle("phases", s)}>{s}</button>)}</div>
-          <label className="mt-3 block text-[12.5px] text-slate">Country
-            <input value={draft.country ?? ""} onChange={(e) => setDraft({ ...draft, country: e.target.value })} placeholder="United States"
-              className="mt-1.5 block w-full rounded-lg border border-line px-3 py-1.5 text-[13.5px] text-ink focus:border-accent focus:outline-none" />
-          </label>
-          <label className={cx("mt-3 flex items-center gap-2 text-[13px] text-ink-2", !hasPatient && "opacity-50")}>
-            <input type="checkbox" disabled={!hasPatient} checked={!!draft.matchPatient} onChange={(e) => setDraft({ ...draft, matchPatient: e.target.checked })}
-              className="size-4 accent-[var(--color-accent)]" />
-            Match the selected patient&apos;s age and sex
-          </label>
-          <h3 className="mt-5 text-[13px] font-semibold text-ink">PubMed</h3>
-          <label className="mt-2 block text-[12.5px] text-slate">Published from <b className="text-ink tabular-nums">{draft.yearFrom ?? 2015}</b>
-            <input type="range" min={2015} max={2026} value={draft.yearFrom ?? 2015} onChange={(e) => setDraft({ ...draft, yearFrom: Number(e.target.value) })}
-              className="mt-1 block w-full accent-[var(--color-accent)]" />
-          </label>
-          <div className="mt-2 flex gap-1.5">
-            {(["", "oncology", "cardiology"] as const).map((t) => (
-              <button key={t || "any"} className={chip((draft.topic ?? "") === t)} onClick={() => setDraft({ ...draft, topic: t })}>{t ? t[0].toUpperCase() + t.slice(1) : "Any topic"}</button>
-            ))}
-          </div>
+          {notes && (<>
+            <h3 className="text-[13px] font-semibold text-ink">{patient ? `${patient.name}'s notes` : "Patient notes"}</h3>
+            <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Note type</p>
+            <div className="flex flex-wrap gap-1.5">{NOTE_TYPES.map((s) => <button key={s} className={chip(!!draft.noteTypes?.includes(s))} onClick={() => toggle("noteTypes", s)}>{s}</button>)}</div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <label className="block text-[12.5px] text-slate">Visit from
+                <input type="date" value={draft.visitFrom ?? ""} onChange={(e) => setDraft({ ...draft, visitFrom: e.target.value })} className={date} />
+              </label>
+              <label className="block text-[12.5px] text-slate">Visit to
+                <input type="date" value={draft.visitTo ?? ""} onChange={(e) => setDraft({ ...draft, visitTo: e.target.value })} className={date} />
+              </label>
+            </div>
+          </>)}
+          {trials && (<>
+            <h3 className="text-[13px] font-semibold text-ink">Clinical trials</h3>
+            <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Status</p>
+            <div className="flex flex-wrap gap-1.5">{STATUSES.map((s) => <button key={s} className={chip(!!draft.status?.includes(s))} onClick={() => toggle("status", s)}>{s}</button>)}</div>
+            <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Phase</p>
+            <div className="flex flex-wrap gap-1.5">{PHASES.map((s) => <button key={s} className={chip(!!draft.phases?.includes(s))} onClick={() => toggle("phases", s)}>{s}</button>)}</div>
+            <label className="mt-3 block text-[12.5px] text-slate">Country
+              <input value={draft.country ?? ""} onChange={(e) => setDraft({ ...draft, country: e.target.value })} placeholder="United States" className={date} />
+            </label>
+            <label className={cx("mt-3 flex items-center gap-2 text-[13px] text-ink-2", !patient && "opacity-50")}>
+              <input type="checkbox" disabled={!patient} checked={!!draft.matchPatient} onChange={(e) => setDraft({ ...draft, matchPatient: e.target.checked })}
+                className="size-4 accent-[var(--color-accent)]" />
+              {patient ? `Match ${patient.name.split(" ")[0]}'s age and sex (${patient.age}, ${patient.sex.toLowerCase()})` : "Match the selected patient's age and sex"}
+            </label>
+          </>)}
+          {lit && (<>
+            <h3 className={cx("text-[13px] font-semibold text-ink", trials && "mt-5")}>{litName}</h3>
+            <label className="mt-2 block text-[12.5px] text-slate">Published from <b className="text-ink tabular-nums">{draft.yearFrom ?? 2015}</b>
+              <input type="range" min={2015} max={2026} value={draft.yearFrom ?? 2015} onChange={(e) => setDraft({ ...draft, yearFrom: Number(e.target.value) })}
+                className="mt-1 block w-full accent-[var(--color-accent)]" />
+            </label>
+            <div className="mt-2 flex gap-1.5">
+              {(["", "oncology", "cardiology"] as const).map((t) => (
+                <button key={t || "any"} className={chip((draft.topic ?? "") === t)} onClick={() => setDraft({ ...draft, topic: t })}>{t ? t[0].toUpperCase() + t.slice(1) : "Any topic"}</button>
+              ))}
+            </div>
+          </>)}
           <label className="mt-5 block text-[12.5px] text-slate">Results per source <b className="text-ink tabular-nums">{topK}</b>
             <input type="range" min={5} max={30} value={topK} onChange={(e) => setTopK(Number(e.target.value))} className="mt-1 block w-full accent-[var(--color-accent)]" />
           </label>
           <div className="mt-5 flex justify-between">
-            <button onClick={() => { setDraft({}); setFilters({}); setOpen(false); }} className="text-[13px] font-medium text-slate hover:text-ink">Clear all</button>
+            <button onClick={() => { setDraft(cleared); setFilters(cleared); setOpen(false); }} className="text-[13px] font-medium text-slate hover:text-ink">Clear these filters</button>
             <button onClick={() => { setFilters(draft); setOpen(false); }} className="rounded-lg bg-ink px-4 py-2 text-[13px] font-semibold text-white hover:bg-ink-2">Apply filters</button>
           </div>
         </div>
