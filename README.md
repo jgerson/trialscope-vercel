@@ -107,12 +107,14 @@ npm run dev                  # http://localhost:3000
   apply, and the page says so. Links are shareable: `/?q=...&in=notes` or `&in=pubmed,trials`.
 - **Corpus line**: under the search box, the size of each corpus two ways: an exact row count from an aggregate
   `Count` query, and stored bytes from the namespace's metadata, with the monthly storage cost at $0.33 per GB.
-  Hover for how each number was fetched and how long it took.
+  Hover for how each number was fetched and how long it took. The numbers load after the page has rendered
+  (`/api/corpus`), are cached for 10 minutes per server, and concurrent requests share one set of calls.
 - **Facets**: counts per trial status, per topic for abstracts and full text, or per note type, each from one
   aggregate query with `group_by` per namespace, shown for information. The source's other active filters apply;
   all filtering itself happens in the Filters panel.
 - **Cache warm-up**: selecting a patient asks turbopuffer to warm their namespace (`hint_cache_warm`). A dot on the
-  selected patient in the sidebar shows cold, warming or warm, read from a tiny count query's cache temperature.
+  selected patient in the sidebar shows cold, warming or warm, read from a tiny count query's cache temperature
+  (checked once on selection and once more a few seconds later).
 - **Full text**: 2,000 open-access articles from PubMed Central, stored as passages and shown one
   result per article, labeled with the section that matched ("Matched in Methods") and how many
   passages matched. **More from this article** expands the next two best passages, and the card shows

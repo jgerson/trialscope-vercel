@@ -7,6 +7,7 @@ import { UserButton, useUser } from "@clerk/nextjs";
 import { ArrowUpRight, FileText, Menu, Search, X } from "lucide-react";
 import type { Patient } from "@/lib/types";
 import { cx, Kbd, LogoMark } from "./ui";
+import { useCorpus } from "@/lib/use-corpus";
 
 interface Ctx {
   patients: Patient[];
@@ -30,9 +31,9 @@ export const useApp = () => {
 const stageText = (p: Patient) =>
   !p.stage ? "" : /^(NYHA|Post|Parox|Persis)/.test(p.stage) ? p.stage : `stage ${p.stage}`;
 
-export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly, counts, children }: {
+export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly, children }: {
   patients: Patient[]; initialPatientId: string | null; copilotEnabled: boolean; readOnly: boolean;
-  counts: Record<string, number>; children: React.ReactNode;
+  children: React.ReactNode;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -80,7 +81,7 @@ export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly,
         if (!stop) setCache(null);
       }
     };
-    check(true, 4);
+    check(true, 1); // warm, then look once more a moment later
     return () => { stop = true; clearTimeout(timer); };
   }, [patientId]);
 
@@ -98,7 +99,7 @@ export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly,
         </div>
         {navOpen && <div className="fixed inset-0 z-40 bg-ink/30 lg:hidden" onClick={() => setNavOpen(false)} />}
 
-        <Sidebar open={navOpen} onClose={() => setNavOpen(false)} counts={counts} />
+        <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />
 
         <main className="min-w-0 flex-1 pt-14 lg:pt-0">{children}</main>
       </div>
@@ -107,7 +108,8 @@ export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly,
   );
 }
 
-function Sidebar({ open, onClose, counts }: { open: boolean; onClose: () => void; counts: Record<string, number> }) {
+function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const corpus = useCorpus();
   const { patients, patient, selectPatient, openPalette, cache } = useApp();
   const pathname = usePathname();
   const [panel, setPanel] = useState<"All" | "Oncology" | "Cardiology">("All");
@@ -197,7 +199,7 @@ function Sidebar({ open, onClose, counts }: { open: boolean; onClose: () => void
       </ul>
       <Account />
       <div className="border-t border-line px-5 py-3 text-[11.5px] leading-relaxed text-slate">
-        {counts.pubmed ? `${counts.pubmed.toLocaleString()} abstracts and ${counts.trials.toLocaleString()} trials on turbopuffer. ` : ""}
+        {corpus.pubmed && corpus.trials ? `${corpus.pubmed.rows.toLocaleString()} abstracts and ${corpus.trials.rows.toLocaleString()} trials on turbopuffer. ` : ""}
         Personal learning project. Synthetic patients, not for clinical use.
       </div>
     </aside>

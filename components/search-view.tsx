@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUpRight, ClipboardCheck, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
 import type { CorpusStat, Facet, Hit, Mode, Patient, SearchFilters, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
+import { useCorpus } from "@/lib/use-corpus";
 import { HitExplainer, RunOverview } from "./explain";
 import { cx, highlight, Segmented, SourceTag, Tip } from "./ui";
 
@@ -36,7 +37,8 @@ function initialSources(params: URLSearchParams): { area: Area; lit: Source[] } 
 
 const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`);
 
-export function SearchView({ stats }: { stats: Record<string, CorpusStat> }) {
+export function SearchView() {
+  const stats = useCorpus();
   const params = useSearchParams();
   const router = useRouter();
   const { patient } = useApp();

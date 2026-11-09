@@ -2,7 +2,6 @@ import { cookies } from "next/headers";
 import { AppShell } from "@/components/app-shell";
 import { config, copilotEnabled } from "@/lib/config";
 import { getPatients } from "@/lib/patients";
-import { corpusCounts } from "@/lib/tpuf";
 
 export const dynamic = "force-dynamic";
 
@@ -15,10 +14,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       </div>
     );
   }
-  const [patients, counts, jar] = await Promise.all([getPatients(), corpusCounts().catch(() => ({})), cookies()]);
+  const [patients, jar] = await Promise.all([getPatients(), cookies()]);
   return (
     <AppShell patients={patients} initialPatientId={jar.get("ts_patient")?.value ?? null}
-      copilotEnabled={copilotEnabled} readOnly={config.readOnly} counts={counts as Record<string, number>}>
+      copilotEnabled={copilotEnabled} readOnly={config.readOnly}>
       {children}
     </AppShell>
   );
