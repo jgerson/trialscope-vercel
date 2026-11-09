@@ -66,6 +66,8 @@ const SYSTEM = (patient: Patient | null) => `You are the TrialScope copilot, hel
 notes, PubMed and ClinicalTrials.gov. All patients are synthetic demo records.
 
 Rules:
+- Every note returned for the current patient belongs to that patient. A note's author is the clinician who wrote it, \
+never the patient. Don't exclude or question a note because of who wrote it.
 - Ground every claim in tool results and cite it with the tag shown in the result, like [N2], [P1]${config.fulltextEnabled ? ", [F1]" : ""} or [T3].${config.fulltextEnabled ? FULLTEXT_RULE : ""}
 - For trial matching, first read the patient's notes, extract diagnosis, stage, biomarkers, age, sex and location, then \
 search trials with filters (usually status Recruiting or Not yet recruiting, the patient's country, and match_patient_age_sex).
@@ -185,9 +187,13 @@ async function copilotLoop(
     }
     return byKey.get(h.key)!;
   };
+  // Notes are labelled field by field: an unlabelled clinician's name next to a note once read as a different patient's name.
+  const head = (t: string, h: Hit) => h.kind === "notes"
+    ? `[${t}] date: ${h.meta[0] ?? ""} | type: ${h.meta[1] ?? ""} | author (clinician): ${h.meta[2] ?? ""} | title: ${h.title}`
+    : `[${t}] ${[h.code, ...h.meta, h.section ? `section: ${h.section}` : "", h.chunk ? `passage ${h.chunk}` : ""].filter(Boolean).join(" | ")}` +
+      ` | ${h.title}`;
   const fmt = (t: string, h: Hit) =>
-    `[${t}] ${[h.code, ...h.meta, h.section ? `section: ${h.section}` : "", h.chunk ? `passage ${h.chunk}` : ""].filter(Boolean).join(" | ")}` +
-    ` | ${h.title}\n` +
+    `${head(t, h)}\n` +
     // Full text: give the model whole passages (the best three per article), not the on-screen snippet.
     (h.kind === "fulltext"
       ? String(h.raw.passage ?? h.snippet) + (h.more ?? []).map((m) => `\n\n(also passage ${m.chunk}, ${m.section}):\n${m.text}`).join("")
@@ -212,7 +218,7 @@ async function copilotLoop(
         return fmt(t, h);
       });
       emit({ type: "step", tool: name, input, results: notes.length, ms: performance.now() - t1, returned, reasoning });
-      return out.join("\n\n") || "No notes.";
+      return out.length ? `Notes for ${patient.name} (patient ${patient.id}), newest first:\n\n${out.join("\n\n")}` : "No notes.";
     }
     if (name === "read_article") {
       if (!config.fulltextEnabled) return "Full-text articles are not available on this deployment.";
