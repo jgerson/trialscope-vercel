@@ -12,6 +12,9 @@ export const config = {
   copilotModel:
     process.env.COPILOT_MODEL ?? (process.env.ANTHROPIC_API_KEY ? "claude-sonnet-5-5" : "anthropic/claude-sonnet-5.5"),
   readOnly: ["1", "true", "yes"].includes((process.env.READ_ONLY ?? "").toLowerCase()),
+  // Full-text article search (ts-pmc). Off unless FULLTEXT_ENABLED is true: the search page, the copilot and the
+  // corpus numbers then leave full text out. The code and data stay; turning it on needs only the setting and a redeploy.
+  fulltextEnabled: ["1", "true", "yes"].includes((process.env.FULLTEXT_ENABLED ?? "").toLowerCase()),
   embedModel: "voyage/voyage-4-lite",
 };
 

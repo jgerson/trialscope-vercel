@@ -10,12 +10,13 @@ import { HitExplainer, RunOverview } from "./explain";
 import { cx, highlight, Segmented, SourceTag, Tip } from "./ui";
 
 const EXAMPLES = ["trastuzumab cardiotoxicity monitoring", "EGFR exon 19 resistance after osimertinib",
-  "how was LVEF measured and what threshold defined cardiotoxicity",
   "pulsed field ablation for atrial fibrillation", "NCT03418961"];
+// A question whose answer sits in an article's methods, so it only makes sense with full text on.
+const FULLTEXT_EXAMPLE = "how was LVEF measured and what threshold defined cardiotoxicity";
 const STATUSES = ["Recruiting", "Not yet recruiting", "Active not recruiting", "Completed", "Enrolling by invitation", "Terminated"];
 const PHASES = ["Early phase 1", "Phase 1", "Phase 2", "Phase 3", "Phase 4"];
 const NOTE_TYPES = ["Visit note", "Result", "Phone call", "Treatment plan", "Other"];
-const LITERATURE: Source[] = ["pubmed", "fulltext", "trials"];
+const ALL_LITERATURE: Source[] = ["pubmed", "fulltext", "trials"];
 const LIT_LABEL: Record<Source, string> = { notes: "Patient notes", pubmed: "Abstracts", fulltext: "Full text", trials: "Trials" };
 const MODES: { value: Mode; label: string; hint: string }[] = [
   { value: "hybrid", label: "Hybrid", hint: "Runs a meaning search and a keyword search in one request and merges the two ranked lists (reciprocal rank fusion). The best default." },
@@ -26,13 +27,14 @@ const MODES: { value: Mode; label: string; hint: string }[] = [
 type Area = "notes" | "literature";
 
 /** Sources from the URL: `in=notes` or `in=pubmed,trials`; older links use `scope`. */
-function initialSources(params: URLSearchParams): { area: Area; lit: Source[] } {
+function initialSources(params: URLSearchParams, LITERATURE: Source[]): { area: Area; lit: Source[] } {
   const inParam = params.get("in");
   if (inParam === "notes" || params.get("scope") === "patient") return { area: "notes", lit: LITERATURE };
   const picked = (inParam ?? "").split(",").filter((s): s is Source => LITERATURE.includes(s as Source));
   if (picked.length) return { area: "literature", lit: picked };
-  const legacy = ({ literature: ["pubmed"], fulltext: ["fulltext"], trials: ["trials"] } as Record<string, Source[]>)[params.get("scope") ?? ""];
-  return { area: "literature", lit: legacy ?? LITERATURE };
+  const legacy = ({ literature: ["pubmed"], fulltext: ["fulltext"], trials: ["trials"] } as Record<string, Source[]>)[params.get("scope") ?? ""]
+    ?.filter((s) => LITERATURE.includes(s));
+  return { area: "literature", lit: legacy?.length ? legacy : LITERATURE };
 }
 
 const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`);
@@ -41,9 +43,11 @@ export function SearchView() {
   const stats = useCorpus();
   const params = useSearchParams();
   const router = useRouter();
-  const { patient } = useApp();
+  const { patient, fulltextEnabled } = useApp();
+  const LITERATURE = fulltextEnabled ? ALL_LITERATURE : ALL_LITERATURE.filter((s) => s !== "fulltext");
+  const examples = fulltextEnabled ? [...EXAMPLES.slice(0, 2), FULLTEXT_EXAMPLE, ...EXAMPLES.slice(2)] : EXAMPLES;
   const [input, setInput] = useState(params.get("q") ?? "");
-  const [{ area, lit }, setSources] = useState(() => initialSources(params));
+  const [{ area, lit }, setSources] = useState(() => initialSources(params, LITERATURE));
   const [mode, setMode] = useState<Mode>((params.get("mode") as Mode) || "hybrid");
   const [filters, setFilters] = useState<SearchFilters>({});
   const [topK, setTopK] = useState(10);
@@ -119,7 +123,7 @@ export function SearchView() {
               Search the chart or <em className="italic text-slate">the literature</em>.
             </h1>
             <p className="mt-4 max-w-[62ch] text-[16px] leading-relaxed text-slate">
-              A patient’s own notes, or PubMed, full-text articles and clinical trials, ranked by turbopuffer. Exact terms
+              A patient’s own notes, or PubMed{fulltextEnabled ? ", full-text articles" : ""} and clinical trials, ranked by turbopuffer. Exact terms
               match on keywords, questions match on meaning.
             </p>
           </div>
@@ -142,7 +146,7 @@ export function SearchView() {
             { value: "notes", label: notesLabel, hint: patient
               ? `Only ${patient.name}'s chart notes, in their own turbopuffer namespace (ts-patient-${patient.id}). Synthetic, written by a script.`
               : "Pick a patient on the left to search their chart notes. Each patient has their own turbopuffer namespace." },
-            { value: "literature", label: "Literature and trials", hint: "Public medical literature and trials. Pick any mix of abstracts, full text and trials." },
+            { value: "literature", label: "Literature and trials", hint: `Public medical literature and trials. Pick any mix of ${fulltextEnabled ? "abstracts, full text and trials" : "abstracts and trials"}.` },
           ]} />
           {area === "literature" && (
             <div role="group" aria-label="Sources" className="inline-flex flex-wrap gap-1.5">
@@ -180,7 +184,7 @@ export function SearchView() {
           <div className="mt-10">
             <h2 className="text-[13px] font-semibold text-ink">Try one of these</h2>
             <div className="mt-3 flex flex-wrap gap-2">
-              {EXAMPLES.map((ex) => (
+              {examples.map((ex) => (
                 <button key={ex} onClick={() => submit(ex)}
                   className="rounded-full border border-line bg-surface px-4 py-2 text-[13.5px] text-ink-2 hover:border-line-2 hover:text-ink">
                   {ex}
@@ -258,7 +262,8 @@ function CorpusLine({ area, patient, stats, total }: {
     );
   }
   if (!stats.pubmed) return null;
-  const rows: [string, string][] = [["pubmed", "abstracts"], ["fulltext", "full-text passages"], ["trials", "trials"]];
+  const rows = ([["pubmed", "abstracts"], ["fulltext", "full-text passages"], ["trials", "trials"]] as [string, string][])
+    .filter(([k]) => stats[k]);
   return (
     <div className="mt-2.5 text-[12.5px] text-slate">
       <Tip align="left" text={

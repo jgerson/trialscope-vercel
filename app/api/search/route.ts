@@ -1,7 +1,7 @@
 import { after, NextResponse } from "next/server";
 import { startActiveObservation } from "@langfuse/tracing";
 import { flushLangfuse, newTrace } from "@/lib/langfuse";
-import { NS } from "@/lib/config";
+import { config, NS } from "@/lib/config";
 import { getPatient } from "@/lib/patients";
 import { buildFilters, search } from "@/lib/tpuf";
 import type { Mode, SearchFilters, Source } from "@/lib/types";
@@ -56,9 +56,10 @@ const ALL: Source[] = ["notes", "pubmed", "fulltext", "trials"];
 /** The sources to search. Older links send `scope` instead: "patient", "literature", "fulltext", "trials" or "all". */
 function parseSources(sources: unknown, scope?: string): Source[] {
   if (Array.isArray(sources)) {
-    const picked = ALL.filter((s) => sources.includes(s));
+    const picked = ALL.filter((s) => sources.includes(s) && (s !== "fulltext" || config.fulltextEnabled));
     return picked.includes("notes") ? ["notes"] : picked;
   }
+  if (scope === "fulltext" && !config.fulltextEnabled) return ["pubmed"];
   return ({ patient: ["notes"], literature: ["pubmed"], fulltext: ["fulltext"], trials: ["trials"] } as Record<string, Source[]>)[scope ?? ""]
-    ?? ["pubmed", "fulltext", "trials"];
+    ?? (config.fulltextEnabled ? ["pubmed", "fulltext", "trials"] : ["pubmed", "trials"]);
 }
