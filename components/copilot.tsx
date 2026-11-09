@@ -17,7 +17,7 @@ interface Step {
 }
 interface Turn {
   q: string; answer: string; steps: Step[]; cites: Record<string, Hit>; seconds?: number; error?: string; pending: boolean;
-  usage?: Usage;
+  usage?: Usage; notice?: string; finished?: boolean;
 }
 
 const TAG_RE = /\[([NPFT]\d+)\]/g;
@@ -76,13 +76,16 @@ export function Copilot({ patient }: { patient: Patient }) {
           else if (ev.type === "citations") update((t) => ({ ...t, cites: ev.items }));
           else if (ev.type === "error") update((t) => ({ ...t, error: ev.message }));
           else if (ev.type === "usage") update((t) => ({ ...t, usage: ev.usage }));
-          else if (ev.type === "done") update((t) => ({ ...t, seconds: ev.seconds }));
+          else if (ev.type === "done") update((t) => ({ ...t, seconds: ev.seconds, finished: true }));
+          else if (ev.type === "notice") update((t) => ({ ...t, notice: ev.message }));
         }
       }
     } catch (e) {
       update((t) => ({ ...t, error: (e as Error).message }));
     } finally {
-      update((t) => ({ ...t, pending: false }));
+      // The stream ended without a "done" event and without an error: the server was cut off (usually the time limit).
+      update((t) => ({ ...t, pending: false,
+        ...(!t.finished && !t.error ? { notice: "The answer stopped before it finished, probably at the time limit. Try asking again or narrowing the question." } : {}) }));
     }
   }
 
@@ -127,6 +130,7 @@ export function Copilot({ patient }: { patient: Patient }) {
             )}
             {t.answer && <Answer text={t.answer} cites={t.cites} />}
             {t.error && <p className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-[13px] text-red-800">{t.error}</p>}
+            {t.notice && <p className="mt-3 rounded-xl border border-line bg-paper px-3 py-2 text-[12.5px] text-slate">{t.notice}</p>}
             {t.seconds != null && <AnswerFooter turn={t} cited={cited} />}
           </div>
         ); })}

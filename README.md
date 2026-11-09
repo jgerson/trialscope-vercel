@@ -138,7 +138,9 @@ npm run dev                  # http://localhost:3000
   `[T1]` tags open source cards.
   Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
   and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
-  After the answer, a footer shows time, sources cited, tokens and approximate cost.
+  After the answer, a footer shows time, sources cited, tokens and approximate cost. Each question gets up to six model
+  turns of up to 4,000 output tokens each, within the route's 300-second limit; if one of those limits stops an answer,
+  a note under it says which.
 - **Trial page** (`/trials/<NCT id>`, linked from trial results and copilot citations): reads the trial live from the
   ClinicalTrials.gov API, because the index keeps only the first 2,500 characters of eligibility criteria and no sites.
   - **Eligibility checklist**: one model call (`lib/eligibility.ts`) checks each criterion against the selected

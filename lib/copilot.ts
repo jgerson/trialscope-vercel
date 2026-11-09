@@ -97,7 +97,9 @@ export type CopilotEvent =
   | { type: "citations"; items: Record<string, Hit> }
   | { type: "error"; message: string }
   | { type: "usage"; usage: Usage }
-  | { type: "done"; seconds: number };
+  | { type: "done"; seconds: number }
+  // A limit stopped the answer early: shown under it so it never just stops silently.
+  | { type: "notice"; message: string };
 
 const GATEWAY_URL = "https://ai-gateway.vercel.sh";
 
@@ -114,6 +116,12 @@ const trace = (event: string, data: Record<string, unknown>) =>
   console.log(JSON.stringify({ copilot: event, model: config.copilotModel, ...data }));
 
 const REASONING_MAX = 4000;
+
+// Per question: output tokens per model call (thinking counts toward it), model calls, and a soft time budget under
+// the copilot route's 300-second maxDuration.
+const MAX_TOKENS = 4000;
+const MAX_TURNS = 6;
+const SOFT_DEADLINE_MS = 240_000;
 
 // What the model said before calling tools in a turn: its thinking blocks plus any text it wrote first.
 // This is the model's own account of its choice, not a guaranteed explanation of it.
@@ -270,9 +278,15 @@ async function copilotLoop(
   const used = { calls: 0, inTokens: 0, outTokens: 0 };
   let answer = "";
   const price = await priceOf(config.copilotModel);
-  for (let turn = 0; turn < 6; turn++) {
+  let notice: string | null = null;
+  for (let turn = 0; turn < MAX_TURNS; turn++) {
+    // Leave room to finish cleanly before the route's 300-second limit cuts the stream.
+    if (turn > 0 && performance.now() - t0 > SOFT_DEADLINE_MS) {
+      notice = "Stopped early: this question was close to the time limit. Try a narrower question.";
+      break;
+    }
     const params: Anthropic.MessageStreamParams = {
-      model: config.copilotModel, max_tokens: 1500, system: SYSTEM(patient), tools: TOOLS, messages: [...convo],
+      model: config.copilotModel, max_tokens: MAX_TOKENS, system: SYSTEM(patient), tools: TOOLS, messages: [...convo],
       // The model thinks before choosing tools either way; "summarized" returns a summary of that thinking instead of an
       // empty block, for the Reasoning panel and Langfuse.
       thinking: { type: "adaptive", display: "summarized" },
@@ -312,8 +326,10 @@ async function copilotLoop(
     convo.push({ role: "assistant", content: msg.content });
     if (msg.stop_reason !== "tool_use") {
       answer = msg.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("").trim();
+      if (msg.stop_reason === "max_tokens") notice = "The answer was cut off at the length limit. Ask a follow-up to continue.";
       break;
     }
+    if (turn === MAX_TURNS - 1) notice = `Stopped after ${MAX_TURNS} steps without a final answer. Try a narrower question.`;
     // Text written before a tool call is a preamble; the browser clears it when the next step arrives.
     const results: Anthropic.ToolResultBlockParam[] = [];
     for (const block of msg.content) {
@@ -335,6 +351,10 @@ async function copilotLoop(
   }
   const cost = await costOf(config.copilotModel, used.inTokens, used.outTokens);
   trace("done", { totalMs: Math.round(performance.now() - t0), ...used, cost });
+  if (notice) {
+    trace("notice", { message: notice });
+    emit({ type: "notice", message: notice });
+  }
   emit({ type: "citations", items: cites });
   emit({ type: "usage", usage: { ...used, cost } });
   const seconds = (performance.now() - t0) / 1000;
