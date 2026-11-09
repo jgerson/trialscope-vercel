@@ -60,13 +60,13 @@ export function Segmented<T extends string>({ label, value, options, onChange }:
   );
 }
 
-/** A small tooltip shown on hover, and on focus so a tap on a phone shows it too. */
+/** A small tooltip shown while the pointer is over it (or keyboard focus is on it), and hidden as soon as it leaves. */
 export function Tip({ text, children, align = "center" }: { text: React.ReactNode; children: React.ReactNode; align?: "center" | "left" }) {
   return (
     <span className="group/tip relative inline-flex">
       {children}
       <span role="tooltip"
-        className={cx("pointer-events-none absolute top-full z-40 mt-2 w-max max-w-[280px] rounded-lg bg-ink px-3 py-2 text-left text-[12px] leading-snug font-normal text-white opacity-0 shadow-pop transition-opacity delay-150 group-hover/tip:opacity-100 group-focus-within/tip:opacity-100",
+        className={cx("pointer-events-none absolute top-full z-40 mt-2 w-max max-w-[280px] rounded-lg bg-ink px-3 py-2 text-left text-[12px] leading-snug font-normal text-white opacity-0 shadow-pop transition-opacity delay-150 group-hover/tip:opacity-100 group-has-[:focus-visible]/tip:opacity-100",
           align === "center" ? "left-1/2 -translate-x-1/2" : "left-0")}>
         {text}
       </span>

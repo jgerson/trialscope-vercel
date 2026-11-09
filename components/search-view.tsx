@@ -168,7 +168,7 @@ export function SearchView({ stats }: { stats: Record<string, CorpusStat> }) {
           </p>
         )}
 
-        <FacetRow facets={facetList} filters={filters} setFilters={setFilters} />
+        <FacetRow facets={facetList} />
 
         {area === "notes" && !patient && (
           <p className="mt-4 rounded-xl border border-line bg-surface px-4 py-3 text-[13.5px] text-slate">Pick a patient on the left to search their notes.</p>
@@ -283,33 +283,21 @@ function CorpusLine({ area, patient, stats, total }: {
 
 const FACET_LABEL: Record<Facet["source"], string> = { trials: "Trials by status", pubmed: "Abstracts by topic", fulltext: "Full text by topic", notes: "Notes by type" };
 
-/** Counts per value from one grouped aggregate query per source. Clicking a count applies it as a filter. */
-function FacetRow({ facets, filters, setFilters }: { facets: Facet[]; filters: SearchFilters; setFilters: (f: SearchFilters) => void }) {
+/** Counts per value from one grouped aggregate query per source, for information. Filtering happens in the Filters panel. */
+function FacetRow({ facets }: { facets: Facet[] }) {
   const shown = facets.filter((f) => f.groups.length);
   if (!shown.length) return null;
-  const isOn = (f: Facet, v: string) =>
-    f.field === "status" ? !!filters.status?.includes(v) : f.field === "topic" ? filters.topic === v : !!filters.noteTypes?.includes(v);
-  const toggle = (f: Facet, v: string) => {
-    if (f.field === "topic") return setFilters({ ...filters, topic: filters.topic === v ? "" : (v as SearchFilters["topic"]) });
-    const key = f.field === "status" ? "status" : "noteTypes";
-    const cur = filters[key] ?? [];
-    setFilters({ ...filters, [key]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v] });
-  };
   return (
-    <div className="mt-3 flex flex-col gap-1.5">
+    <div className="mt-3 flex flex-col gap-1 text-[12.5px] text-slate">
       {shown.map((f) => (
-        <div key={f.source} className="flex flex-wrap items-center gap-1.5 text-[12.5px]">
-          <Tip align="left" text={`One aggregate query with group_by ["${f.field}"] on ${f.namespace}, ${f.ms} ms. Other active filters apply. Click a count to filter by it.`}>
-            <span tabIndex={0} className="mr-1 cursor-help text-slate underline decoration-dotted underline-offset-2">{FACET_LABEL[f.source]}</span>
+        <p key={f.source}>
+          <Tip align="left" text={`One aggregate Count query with group_by ["${f.field}"] on ${f.namespace}, ${f.ms} ms. Your other active filters apply.`}>
+            <span className="mr-1.5 font-medium text-ink-2 underline decoration-dotted underline-offset-2">{FACET_LABEL[f.source]}</span>
           </Tip>
-          {f.groups.slice(0, 8).map((g) => (
-            <button key={g.value} type="button" aria-pressed={isOn(f, g.value)} onClick={() => toggle(f, g.value)}
-              className={cx("rounded-full border px-2.5 py-0.5",
-                isOn(f, g.value) ? "border-ink bg-ink text-white" : "border-line bg-surface text-ink-2 hover:border-line-2")}>
-              {g.value[0].toUpperCase() + g.value.slice(1)} <span className={cx("tabular-nums", isOn(f, g.value) ? "text-white/75" : "text-slate")}>{g.count.toLocaleString()}</span>
-            </button>
+          {f.groups.slice(0, 8).map((g, i) => (
+            <span key={g.value}>{i ? " · " : ""}{g.value[0].toUpperCase() + g.value.slice(1)} <span className="tabular-nums">{g.count.toLocaleString()}</span></span>
           ))}
-        </div>
+        </p>
       ))}
     </div>
   );
