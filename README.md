@@ -81,6 +81,13 @@ Traces carry the Clerk user id, the Vercel environment (`production`, `preview`,
 the release. Costs are AI Gateway list prices. The setup is in `lib/langfuse-setup.ts` and `lib/langfuse.ts`; without
 the keys it does nothing.
 
+## Walkthrough notebook
+
+[`walkthrough/`](walkthrough/) is a ten-minute, self-contained notebook that shows the turbopuffer basics behind
+the app on 8 real trials typed into it: loading with native embedding, keyword, vector and hybrid search, patient
+filters and a namespace per patient. It creates its own namespaces for each run and never touches the app's data.
+[Open it in Colab](https://colab.research.google.com/github/jgerson/trialscope-vercel/blob/main/walkthrough/trialscope_walkthrough.ipynb).
+
 ## Run locally
 
 ```bash
@@ -188,6 +195,7 @@ in the Streamlit repo).
 | `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `instrumentation.ts` | Optional Langfuse tracing |
 | `components/` | App shell and ⌘K, search view, explain panel, workspace and save details, copilot, trial view and sites map, sign-in frame |
 | `proxy.ts` | Clerk sign-in check before every request |
+| `walkthrough/` | Ten-minute turbopuffer notebook (Colab) |
 
 ## Data sources
 
