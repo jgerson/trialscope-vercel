@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { UserButton, useUser } from "@clerk/nextjs";
-import { FileText, Menu, Search, X } from "lucide-react";
+import { ArrowUpRight, FileText, Menu, Search, X } from "lucide-react";
 import type { Patient } from "@/lib/types";
 import { cx, Kbd, LogoMark } from "./ui";
 
@@ -136,19 +136,35 @@ function Sidebar({ open, onClose, counts }: { open: boolean; onClose: () => void
           className="w-full rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] placeholder:text-slate/70 focus:border-accent focus:outline-none" />
       </div>
       <ul className="mt-2 flex-1 overflow-y-auto px-2 pb-3">
-        {shown.map((p) => (
-          <li key={p.id}>
-            <button onClick={() => selectPatient(p.id)}
-              className={cx("w-full rounded-lg px-3 py-2 text-left",
-                patient?.id === p.id ? "bg-paper ring-1 ring-line" : "hover:bg-paper")}>
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="truncate text-[13.5px] font-semibold text-ink">{p.name}</span>
-                <span className="text-xs text-slate tabular-nums">{p.age}</span>
-              </div>
-              <div className="truncate text-[12.5px] text-slate">{p.primary_dx}{stageText(p) ? `, ${stageText(p)}` : ""}</div>
-            </button>
-          </li>
-        ))}
+        {shown.map((p) => {
+          const selected = patient?.id === p.id;
+          const onWorkspace = pathname === `/patients/${p.id}`;
+          return (
+            <li key={p.id} className="relative">
+              {/* On a patient's workspace a click opens that patient's workspace; anywhere else it only selects them
+                  (for "This patient" search, trial matching and the copilot). */}
+              <button onClick={() => selectPatient(p.id, pathname.startsWith("/patients"))} aria-pressed={selected}
+                className={cx("w-full rounded-lg border-l-[3px] py-2 pr-3 pl-[9px] text-left transition-colors",
+                  selected ? "border-notes bg-notes-soft" : "border-transparent hover:bg-paper")}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className={cx("truncate text-[13.5px] font-semibold", selected ? "text-notes" : "text-ink")}>{p.name}</span>
+                  {selected
+                    ? <span className="shrink-0 rounded bg-notes px-1.5 py-px text-[10.5px] font-semibold tracking-wide text-white uppercase">Selected</span>
+                    : <span className="text-xs text-slate tabular-nums">{p.age}</span>}
+                </div>
+                <div className={cx("truncate text-[12.5px] text-slate", selected && !onWorkspace && "pr-6")}>
+                  {selected ? `${p.age}, ` : ""}{p.primary_dx}{stageText(p) ? `, ${stageText(p)}` : ""}
+                </div>
+              </button>
+              {selected && !onWorkspace && (
+                <Link href={`/patients/${p.id}`} onClick={onClose} aria-label={`Open ${p.name}'s workspace`} title="Open workspace"
+                  className="absolute right-2 bottom-1.5 rounded-md p-1 text-notes hover:bg-surface">
+                  <ArrowUpRight size={15} />
+                </Link>
+              )}
+            </li>
+          );
+        })}
       </ul>
       <Account />
       <div className="border-t border-line px-5 py-3 text-[11.5px] leading-relaxed text-slate">

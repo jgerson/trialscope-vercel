@@ -27,7 +27,7 @@ export async function POST(req: Request) {
   if (body.scope === "literature" || body.scope === "all") targets.push({ namespace: NS.pubmed, filter: buildFilters("pubmed", f) });
   if (body.scope === "fulltext" || body.scope === "all") targets.push({ namespace: NS.pmc, filter: buildFilters("fulltext", f) });
   if (body.scope === "trials" || body.scope === "all") targets.push({ namespace: NS.trials, filter: buildFilters("trials", f, patient) });
-  if (!targets.length) return NextResponse.json({ error: "Pick a patient to search their notes." }, { status: 400 });
+  if (!targets.length) return NextResponse.json({ error: "Pick a patient on the left to search their notes." }, { status: 400 });
 
   // One Langfuse trace per search (tagged "search"), with each namespace's turbopuffer call nested under it.
   after(flushLangfuse);

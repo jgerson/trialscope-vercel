@@ -4,8 +4,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowUp, ArrowUpRight, BookOpen, Check, ChevronRight, FileText, Loader2, ShieldCheck, Sparkles } from "lucide-react";
-import type { GroundingItem, Hit, Patient, SearchResponse, Usage } from "@/lib/types";
+import { ArrowUp, ArrowUpRight, BookOpen, Check, ChevronRight, FileText, Loader2, Sparkles } from "lucide-react";
+import type { Hit, Patient, SearchResponse, Usage } from "@/lib/types";
 import { ExplainDialog } from "./explain";
 import { useApp } from "./app-shell";
 import { cx, SourceTag } from "./ui";
@@ -15,10 +15,9 @@ interface Step {
   returned?: { tag: string; title: string; key: string }[]; reasoning?: string;
   filters?: { source: string; filters: string[] }[]; search?: SearchResponse;
 }
-interface Grounding { items: GroundingItem[]; ms: number; usage: Usage }
 interface Turn {
   q: string; answer: string; steps: Step[]; cites: Record<string, Hit>; seconds?: number; error?: string; pending: boolean;
-  usage?: Usage; checking?: boolean; grounding?: Grounding; groundingError?: string;
+  usage?: Usage;
 }
 
 const TAG_RE = /\[([NPFT]\d+)\]/g;
@@ -78,15 +77,12 @@ export function Copilot({ patient }: { patient: Patient }) {
           else if (ev.type === "error") update((t) => ({ ...t, error: ev.message }));
           else if (ev.type === "usage") update((t) => ({ ...t, usage: ev.usage }));
           else if (ev.type === "done") update((t) => ({ ...t, seconds: ev.seconds }));
-          else if (ev.type === "checking") update((t) => ({ ...t, checking: true }));
-          else if (ev.type === "grounding") update((t) => ({ ...t, checking: false, grounding: { items: ev.items, ms: ev.ms, usage: ev.usage } }));
-          else if (ev.type === "grounding_error") update((t) => ({ ...t, checking: false, groundingError: ev.message }));
         }
       }
     } catch (e) {
       update((t) => ({ ...t, error: (e as Error).message }));
     } finally {
-      update((t) => ({ ...t, pending: false, checking: false }));
+      update((t) => ({ ...t, pending: false }));
     }
   }
 
@@ -131,7 +127,6 @@ export function Copilot({ patient }: { patient: Patient }) {
             )}
             {t.answer && <Answer text={t.answer} cites={t.cites} />}
             {t.error && <p className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-[13px] text-red-800">{t.error}</p>}
-            {(t.checking || t.grounding || t.groundingError) && <SourceCheck turn={t} />}
             {t.seconds != null && <AnswerFooter turn={t} cited={cited} />}
           </div>
         ); })}
@@ -266,61 +261,6 @@ function Reasoning({ text }: { text: string }) {
   );
 }
 
-const VERDICT: Record<GroundingItem["verdict"], { label: string; dot: string; text: string }> = {
-  supported: { label: "Supported", dot: "bg-trials", text: "text-trials" },
-  partial: { label: "Partly supported", dot: "bg-notes", text: "text-notes" },
-  unsupported: { label: "Not supported", dot: "bg-red-700", text: "text-red-800" },
-  uncited: { label: "No source", dot: "bg-slate", text: "text-slate" },
-};
-
-// Each claim in the answer, checked by a second model call against the exact source text the copilot was given.
-function SourceCheck({ turn }: { turn: Turn }) {
-  if (turn.checking) {
-    return (
-      <p className="mt-3 inline-flex items-center gap-2 text-[12.5px] text-slate">
-        <Loader2 size={13} className="animate-spin" />Checking each claim against its sources
-      </p>
-    );
-  }
-  if (turn.groundingError) return <p className="mt-3 text-[12px] text-slate">{turn.groundingError}</p>;
-  const items = turn.grounding?.items ?? [];
-  const counts = (Object.keys(VERDICT) as GroundingItem["verdict"][])
-    .map((v) => [v, items.filter((i) => i.verdict === v).length] as const).filter(([, n]) => n);
-  const flagged = items.some((i) => i.verdict !== "supported");
-  return (
-    <details className="group mt-3 rounded-xl border border-line" open={flagged}>
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[12.5px] [&::-webkit-details-marker]:hidden">
-        <ShieldCheck size={14} className={flagged ? "text-notes" : "text-trials"} />
-        <span className="font-semibold text-ink">Source check</span>
-        <span className="flex-1 text-slate">
-          {items.length ? counts.map(([v, n]) => `${n} ${VERDICT[v].label.toLowerCase()}`).join(", ") : "no factual claims to check"}
-        </span>
-        <ChevronRight size={14} aria-hidden className="shrink-0 text-slate transition-transform group-open:rotate-90" />
-      </summary>
-      {!!items.length && (
-        <ul className="space-y-2 border-t border-line px-3 py-2.5">
-          {items.map((it, i) => (
-            <li key={i} className="text-[12.5px] leading-relaxed">
-              <div className="flex items-start gap-2">
-                <span className={cx("mt-1.5 size-2 shrink-0 rounded-full", VERDICT[it.verdict].dot)} aria-hidden />
-                <div className="min-w-0">
-                  <span className={cx("mr-1.5 font-semibold", VERDICT[it.verdict].text)}>{VERDICT[it.verdict].label}</span>
-                  {!!it.tags.length && <span className="mr-1.5 font-mono text-[11px] text-slate">{it.tags.join(" ")}</span>}
-                  <span className="text-ink-2">{it.claim}</span>
-                  {it.note && it.verdict !== "supported" && <p className="mt-0.5 text-[12px] text-slate">{it.note}</p>}
-                </div>
-              </div>
-            </li>
-          ))}
-          <li className="pt-1 text-[11.5px] text-slate">
-            Checked by a second model call against the cited text only. It can be wrong too, so treat flags as prompts to look.
-          </li>
-        </ul>
-      )}
-    </details>
-  );
-}
-
 const money = (d: number | null | undefined) =>
   d == null ? null : d < 0.01 ? `${(d * 100).toFixed(d < 0.001 ? 3 : 2)}¢` : `$${d.toFixed(2)}`;
 
@@ -328,14 +268,12 @@ function AnswerFooter({ turn, cited }: { turn: Turn; cited?: Set<string> }) {
   const u = turn.usage;
   const retrieved = Object.keys(turn.cites).length;
   const used = cited ? [...cited].filter((tag) => turn.cites[tag]).length : 0;
-  const g = turn.grounding;
   const parts = [
     `${turn.seconds!.toFixed(1)} s`,
     `${used} of ${retrieved} sources cited`,
     u && `${u.calls} model call${u.calls === 1 ? "" : "s"}`,
     u && `${(u.inTokens + u.outTokens).toLocaleString()} tokens`,
     u && money(u.cost) && `≈ ${money(u.cost)}`,
-    g && `check ${(g.ms / 1000).toFixed(1)} s${money(g.usage.cost) ? `, ≈ ${money(g.usage.cost)}` : ""}`,
   ].filter(Boolean);
   return (
     <p className="mt-2 text-[12px] text-slate" title={u ? `${u.inTokens.toLocaleString()} input and ${u.outTokens.toLocaleString()} output tokens at AI Gateway list prices` : undefined}>

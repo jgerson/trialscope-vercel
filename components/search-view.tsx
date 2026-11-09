@@ -14,7 +14,7 @@ const EXAMPLES = ["trastuzumab cardiotoxicity monitoring", "EGFR exon 19 resista
 const STATUSES = ["Recruiting", "Not yet recruiting", "Active not recruiting", "Completed", "Enrolling by invitation", "Terminated"];
 const PHASES = ["Early phase 1", "Phase 1", "Phase 2", "Phase 3", "Phase 4"];
 const SCOPES: { value: Scope; label: string }[] = [
-  { value: "all", label: "All" }, { value: "patient", label: "This patient" },
+  { value: "all", label: "All" }, { value: "patient", label: "Patient notes" },
   { value: "literature", label: "Abstracts" }, { value: "fulltext", label: "Full text" }, { value: "trials", label: "Trials" },
 ];
 const MODES: { value: Mode; label: string }[] = [{ value: "hybrid", label: "Hybrid" }, { value: "vector", label: "Vector" }, { value: "bm25", label: "BM25" }];
@@ -93,7 +93,8 @@ export function SearchView({ counts }: { counts: Record<string, number> }) {
         </form>
 
         <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3">
-          <Segmented label="Search in" value={scope} options={SCOPES} onChange={setScope} />
+          <Segmented label="Search in" value={scope} onChange={setScope}
+            options={SCOPES.map((o) => (o.value === "patient" && patient ? { ...o, label: `${patient.name.split(" ")[0]}'s notes` } : o))} />
           <Segmented label="Retrieval" value={mode} options={MODES} onChange={setMode} />
           <FiltersButton filters={filters} setFilters={setFilters} topK={topK} setTopK={setTopK} active={activeFilters} hasPatient={!!patient} />
         </div>

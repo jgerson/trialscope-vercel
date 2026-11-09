@@ -72,8 +72,7 @@ observation (a retriever for reads, a span for writes) with its request, timings
 - **Copilot** (`answer-copilot-question`, an agent, tagged `copilot`): one `generate-response` generation per model
   turn with the full prompt it was sent (system prompt, tool definitions, earlier turns, tool results), the model's
   thinking summary and tool calls, tokens and cost; a `search-sources`, `read-patient-notes` or `read-article` tool observation for
-  each tool call, with the filters turbopuffer applied; then `check-answer-grounding`, the source check, with its own
-  generation. Questions in one copilot conversation share a session.
+  each tool call, with the filters turbopuffer applied. Questions in one copilot conversation share a session.
 - **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
   `assess-eligibility-criteria` generation.
 
@@ -121,8 +120,7 @@ npm run dev                  # http://localhost:3000
   `[T1]` tags open source cards.
   Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
   and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
-  After the answer, a **source check** (a second model call, `lib/grounding.ts`) tests each claim against the exact
-  text of the sources it cites, and a footer shows time, tokens and approximate cost.
+  After the answer, a footer shows time, sources cited, tokens and approximate cost.
 - **Trial page** (`/trials/<NCT id>`, linked from trial results and copilot citations): reads the trial live from the
   ClinicalTrials.gov API, because the index keeps only the first 2,500 characters of eligibility criteria and no sites.
   - **Eligibility checklist**: one model call (`lib/eligibility.ts`) checks each criterion against the selected
@@ -190,7 +188,6 @@ in the Streamlit repo).
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/tpuf-log.ts` | Logs every turbopuffer call to Vercel logs and Langfuse |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
-| `lib/grounding.ts` | Source check: each claim tested against the text it cites |
 | `lib/eligibility.ts`, `lib/ctgov.ts`, `lib/places.ts` | Eligibility checklist, live ClinicalTrials.gov reads, site distances |
 | `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `instrumentation.ts` | Optional Langfuse tracing |
 | `components/` | App shell and ⌘K, search view, explain panel, workspace and save details, copilot, trial view and sites map, sign-in frame |

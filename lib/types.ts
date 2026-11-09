@@ -102,14 +102,6 @@ export const KIND_LABEL: Record<Kind, string> = {
 
 // ---------------------------------------------------------------- copilot explainability
 
-/** One claim from a copilot answer, checked against the sources it cites. */
-export interface GroundingItem {
-  claim: string;
-  tags: string[];
-  verdict: "supported" | "partial" | "unsupported" | "uncited";
-  note: string;
-}
-
 /** What one note save did in turbopuffer, for the "What the save did" panel. Numbers come from the write response. */
 export interface WriteReport {
   namespace: string;
@@ -129,7 +121,7 @@ export interface WriteReport {
   billableBytes: number | null;
 }
 
-/** Tokens and approximate cost for one copilot answer or its grounding check. */
+/** Tokens and approximate cost for one copilot answer. */
 export interface Usage {
   calls: number;
   inTokens: number;
