@@ -365,21 +365,6 @@ export async function saveNote(patientId: string, note: Note): Promise<WriteRepo
   };
 }
 
-let _counts: { at: number; value: Record<string, number> } | null = null;
-
-/** Row counts for the sidebar and hero text, from corpusStats plus the patient directory. */
-export async function corpusCounts(): Promise<Record<string, number>> {
-  if (_counts && Date.now() - _counts.at < 10 * 60_000) return _counts.value;
-  const req = { aggregate_by: { c: ["Count"] } };
-  const [stats, dir] = await Promise.all([
-    corpusStats(),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    tpCall("query", NS.patients, req, () => tp().namespace(NS.patients).query(req as any), { label: "count-rows" }) as Promise<any>,
-  ]);
-  _counts = { at: Date.now(), value: { trials: stats.trials.rows, pubmed: stats.pubmed.rows, fulltext: stats.fulltext.rows,
-    patients: Number(dir.aggregations?.c ?? 0) } };
-  return _counts.value;
-}
 
 export async function readArticle(pmcid: string, around?: number, span = 1): Promise<Row[]> {
   const filters: unknown[] = around
@@ -396,14 +381,22 @@ export async function readArticle(pmcid: string, around?: number, span = 1): Pro
 
 // ------------------------------------------------------------------ corpus, facets, cache, explain
 
-let _stats: { at: number; value: Record<string, CorpusStat> } | null = null;
+let _stats: { at: number; value: Promise<Record<string, CorpusStat>> } | null = null;
 
 /**
  * Size of each shared corpus, two ways: an exact row count from an aggregate query, and stored bytes from the
- * namespace's metadata (a separate API call that searches nothing). Cached for 10 minutes per server instance.
+ * namespace's metadata (a separate API call that searches nothing). Cached for 10 minutes per server instance, and
+ * callers that arrive while it's being worked out share the same requests.
  */
-export async function corpusStats(): Promise<Record<string, CorpusStat>> {
+export function corpusStats(): Promise<Record<string, CorpusStat>> {
   if (_stats && Date.now() - _stats.at < 10 * 60_000) return _stats.value;
+  const value = loadCorpusStats();
+  _stats = { at: Date.now(), value };
+  value.catch(() => { if (_stats?.value === value) _stats = null; }); // don't cache a failure
+  return value;
+}
+
+async function loadCorpusStats(): Promise<Record<string, CorpusStat>> {
   const one = async (namespace: string): Promise<CorpusStat> => {
     const ns = tp().namespace(namespace);
     const req = { aggregate_by: { c: ["Count"] } };
@@ -418,8 +411,7 @@ export async function corpusStats(): Promise<Record<string, CorpusStat>> {
       countMs: Math.round(count.ms), metadataMs: Math.round(meta.ms) };
   };
   const [trials, pubmed, fulltext] = await Promise.all([one(NS.trials), one(NS.pubmed), one(NS.pmc)]);
-  _stats = { at: Date.now(), value: { trials, pubmed, fulltext } };
-  return _stats.value;
+  return { trials, pubmed, fulltext };
 }
 
 const FACET_FIELD: Record<Source, Facet["field"]> = { trials: "status", pubmed: "topic", fulltext: "topic", notes: "note_type" };
