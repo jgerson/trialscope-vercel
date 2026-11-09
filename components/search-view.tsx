@@ -98,6 +98,9 @@ export function SearchView() {
     else if (lit.length < LITERATURE.length) sp.set("in", lit.join(","));
     if (mode !== "hybrid") sp.set("mode", mode);
     router.replace(`/?${sp.toString()}`, { scroll: false });
+    // The search re-runs when the query in the URL changes. Searching the same words again (say, after switching from
+    // hybrid to vector) leaves the query unchanged, so run it directly.
+    if (text.trim() === q.trim()) run(text);
   };
 
   const toggleLit = (s: Source) => setSources(({ lit: cur }) => {
