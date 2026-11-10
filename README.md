@@ -17,6 +17,30 @@ This is the web version of the Streamlit app in
 [jgerson/trialscope-demo](https://github.com/jgerson/trialscope-demo). Both read the same
 turbopuffer namespaces, so no data needs loading here.
 
+## Screenshots
+
+**Search.** Pick the selected patient's notes, or any mix of PubMed abstracts and clinical trials, and a retrieval mode.
+The line under the box and the counts below the controls come from turbopuffer aggregate queries and namespace metadata.
+
+![Search page with source picker, corpus counts and topic and status counts](docs/screenshots/search.png)
+
+**Explain.** Every result shows why it ranked where it did: its rank by meaning and by keywords, how the two were
+fused, the cosine distance, the BM25 score and the words that matched.
+
+![Hybrid search results with the Explain panel open on the top result](docs/screenshots/search-explain.png)
+
+**Copilot.** Claude reads the patient's notes and searches trials through turbopuffer, then answers with citations
+(`[N3]`, `[T1]`) that open the source. Each tool call is listed as a step and expands to show what it ran.
+
+![Patient workspace with the copilot answering a trial-matching question](docs/screenshots/copilot.png)
+
+**Tracing.** The same question in Langfuse: the system prompt, Claude's reasoning, each tool call and the final
+answer, with time, tokens and cost for the whole trace.
+
+![Langfuse session showing the copilot's reasoning, tool calls and answer](docs/screenshots/langfuse-trace.png)
+
+All patients are synthetic. Personal account details are blurred.
+
 ## Deploy to Vercel
 
 1. Push this folder to a new GitHub repo.
