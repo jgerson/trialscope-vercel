@@ -12,6 +12,9 @@ export const config = {
   copilotModel:
     process.env.COPILOT_MODEL ?? (process.env.ANTHROPIC_API_KEY ? "claude-sonnet-5-5" : "anthropic/claude-sonnet-5.5"),
   readOnly: ["1", "true", "yes"].includes((process.env.READ_ONLY ?? "").toLowerCase()),
+  // Anthropic prompt caching for the copilot (COPILOT_PROMPT_CACHE=true). Each model call in a question re-sends the
+  // system prompt, tools and earlier turns; cached, those cost a fraction of the input price on the next call.
+  promptCache: ["1", "true", "yes"].includes((process.env.COPILOT_PROMPT_CACHE ?? "").toLowerCase()),
   embedModel: "voyage/voyage-4-lite",
 };
 

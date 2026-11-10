@@ -139,8 +139,12 @@ export interface WriteReport {
 /** Tokens and approximate cost for one copilot answer. */
 export interface Usage {
   calls: number;
+  /** All input tokens, cached or not. */
   inTokens: number;
   outTokens: number;
+  /** Input tokens read from the prompt cache, and written to it (included in inTokens). */
+  cacheRead?: number;
+  cacheWrite?: number;
   /** US dollars at AI Gateway list prices; null when the price isn't known (e.g. calling Anthropic directly). */
   cost: number | null;
 }

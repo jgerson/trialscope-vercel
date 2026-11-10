@@ -275,7 +275,7 @@ function AnswerFooter({ turn, cited }: { turn: Turn; cited?: Set<string> }) {
   ].filter(Boolean);
   return (
     <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-      <p className="text-[12px] text-slate" title={u ? `${u.inTokens.toLocaleString()} input and ${u.outTokens.toLocaleString()} output tokens at AI Gateway list prices` : undefined}>
+      <p className="text-[12px] text-slate" title={u ? `${u.inTokens.toLocaleString()} input${u.cacheRead ? ` (${u.cacheRead.toLocaleString()} read from the prompt cache)` : ""} and ${u.outTokens.toLocaleString()} output tokens at AI Gateway list prices` : undefined}>
         {parts.join(" · ")}
       </p>
       {turn.traceId && <Feedback traceId={turn.traceId} />}

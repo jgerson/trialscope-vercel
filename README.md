@@ -53,6 +53,7 @@ All patients are synthetic. Personal account details are blurred.
    | `TURBOPUFFER_API_KEY` | your turbopuffer key (required) |
    | `TURBOPUFFER_REGION` | `aws-us-east-1` |
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
+   | `COPILOT_PROMPT_CACHE` | `true` turns on Anthropic prompt caching for the copilot (optional; off by default) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
    | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
@@ -169,7 +170,10 @@ npm run dev                  # http://localhost:3000
   listed as it happens, and `[N1]`, `[P1]`, `[T1]` tags open source cards.
   Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
   and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
-  After the answer, a footer shows time, sources cited, tokens and approximate cost. Each question gets up to six model
+  After the answer, a footer shows time, sources cited, tokens and approximate cost. With
+  `COPILOT_PROMPT_CACHE=true`, each model call reads the previous call's prompt from Anthropic's prompt cache (automatic
+  caching, 5-minute lifetime); cache reads and writes are priced separately, shown on hover and logged per turn. If the
+  API ever rejects the cache setting, the copilot retries without it. Each question gets up to six model
   turns of up to 4,000 output tokens each, within the route's 300-second limit; if one of those limits stops an answer,
   a note under it says which.
 - **Trial page** (`/trials/<NCT id>`, linked from trial results and copilot citations): reads the trial live from the

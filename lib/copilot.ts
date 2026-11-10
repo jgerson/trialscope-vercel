@@ -88,6 +88,10 @@ export type CopilotEvent =
 
 const GATEWAY_URL = "https://ai-gateway.vercel.sh";
 
+// Set if a request is ever rejected because of cache_control; caching then stays off until the next cold start.
+let cacheRejected = false;
+const useCache = () => config.promptCache && !cacheRejected;
+
 // Direct to Anthropic when ANTHROPIC_API_KEY is set; otherwise through AI Gateway with its key or the Vercel OIDC token.
 export async function copilotClient(): Promise<Anthropic> {
   if (config.anthropicKey) return new Anthropic({ apiKey: config.anthropicKey, fetch: tracedFetch });
@@ -156,7 +160,8 @@ export async function runCopilot(
       const r = await copilotLoop(messages, patient, mode, emit);
       agent.update({
         output: r.answer || null,
-        metadata: { turns: r.calls, inTokens: r.inTokens, outTokens: r.outTokens, cost: r.cost, citations: r.citations, seconds: r.seconds },
+        metadata: { turns: r.calls, inTokens: r.inTokens, outTokens: r.outTokens, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite,
+          promptCache: useCache(), cost: r.cost, citations: r.citations, seconds: r.seconds },
         ...(r.answer ? {} : { level: "WARNING" as const, statusMessage: "No answer within the turn limit." }),
       });
     } catch (e) {
@@ -171,7 +176,8 @@ async function copilotLoop(
   patient: Patient | null,
   mode: Mode,
   emit: (e: CopilotEvent) => void,
-): Promise<{ answer: string; calls: number; inTokens: number; outTokens: number; cost: number | null; citations: number; seconds: number }> {
+): Promise<{ answer: string; calls: number; inTokens: number; outTokens: number; cacheRead: number; cacheWrite: number;
+  cost: number | null; citations: number; seconds: number }> {
   const llm = await copilotClient();
   const t0 = performance.now();
   const cites: Record<string, Hit> = {};
@@ -254,7 +260,8 @@ async function copilotLoop(
   }
 
   const convo = [...messages];
-  const used = { calls: 0, inTokens: 0, outTokens: 0 };
+  // inTokens counts all input; cacheRead and cacheWrite are the parts that hit or filled the prompt cache.
+  const used = { calls: 0, inTokens: 0, outTokens: 0, cacheRead: 0, cacheWrite: 0 };
   let answer = "";
   const price = await priceOf(config.copilotModel);
   let notice: string | null = null;
@@ -269,10 +276,14 @@ async function copilotLoop(
       // The model thinks before choosing tools either way; "summarized" returns a summary of that thinking instead of an
       // empty block, for the Reasoning panel and Langfuse.
       thinking: { type: "adaptive", display: "summarized" },
+      // Automatic prompt caching: the cache mark sits on the last block and moves forward each turn, so every call
+      // reads the previous call's prompt from the cache instead of paying full price for it again.
+      ...(useCache() ? { cache_control: { type: "ephemeral" as const } } : {}),
     };
     // One generation per model call, with the exact prompt it was sent (system prompt, tools, every earlier turn).
     const gen = startObservation("generate-response", {
-      model: config.copilotModel, modelParameters: { max_tokens: params.max_tokens, thinking: "adaptive, summarized" },
+      model: config.copilotModel,
+      modelParameters: { max_tokens: params.max_tokens, thinking: "adaptive, summarized", promptCache: useCache() ? "on" : "off" },
       input: promptOf(params), metadata: { turn },
     }, { asType: "generation" });
     const stream = llm.messages.stream(params);
@@ -284,6 +295,16 @@ async function copilotLoop(
     try {
       msg = await stream.finalMessage();
     } catch (e) {
+      // If the API (or the gateway in front of it) rejects the cache setting, turn caching off for this server
+      // instance and retry the same turn without it, rather than failing the question.
+      const err = e as { status?: number; message?: string };
+      if (params.cache_control && firstToken === null && err.status === 400 && /cache/i.test(err.message ?? "")) {
+        cacheRejected = true;
+        gen.update({ level: "WARNING", statusMessage: "Prompt caching rejected; retrying without it." }).end();
+        trace("notice", { message: "prompt cache rejected; retrying without", error: String(err.message).slice(0, 300) });
+        turn--;
+        continue;
+      }
       gen.update({ level: "ERROR", statusMessage: (e as Error).message.slice(0, 500) }).end();
       throw e;
     }
@@ -294,13 +315,17 @@ async function copilotLoop(
       metadata: { turn, stopReason: msg.stop_reason },
     }).end();
     used.calls += 1;
-    used.inTokens += msg.usage.input_tokens;
+    const cacheRead = msg.usage.cache_read_input_tokens ?? 0, cacheWrite = msg.usage.cache_creation_input_tokens ?? 0;
+    used.inTokens += msg.usage.input_tokens + cacheRead + cacheWrite;
     used.outTokens += msg.usage.output_tokens;
+    used.cacheRead += cacheRead;
+    used.cacheWrite += cacheWrite;
     // Only a turn that calls tools has reasoning to attach; a final answer's text is the answer itself.
     const reasoning = msg.stop_reason === "tool_use" ? reasoningOf(msg.content) : undefined;
     trace("model", {
       turn, ms: Math.round(performance.now() - tm), firstTokenMs: firstToken && Math.round(firstToken), stop: msg.stop_reason,
-      inTokens: msg.usage.input_tokens, outTokens: msg.usage.output_tokens, reasoning: reasoning?.slice(0, 500),
+      inTokens: msg.usage.input_tokens + cacheRead + cacheWrite, outTokens: msg.usage.output_tokens, cacheRead, cacheWrite,
+      reasoning: reasoning?.slice(0, 500),
     });
     convo.push({ role: "assistant", content: msg.content });
     if (msg.stop_reason !== "tool_use") {
@@ -328,7 +353,8 @@ async function copilotLoop(
     }
     convo.push({ role: "user", content: results });
   }
-  const cost = await costOf(config.copilotModel, used.inTokens, used.outTokens);
+  const cost = await costOf(config.copilotModel, used.inTokens - used.cacheRead - used.cacheWrite, used.outTokens,
+    used.cacheRead, used.cacheWrite);
   trace("done", { totalMs: Math.round(performance.now() - t0), ...used, cost });
   if (notice) {
     trace("notice", { message: notice });

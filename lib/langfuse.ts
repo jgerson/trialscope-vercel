@@ -7,7 +7,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { context, ROOT_CONTEXT } from "@opentelemetry/api";
 import { propagateAttributes, startObservation, type PropagateAttributesParams } from "@langfuse/tracing";
 import { ensureLangfuse } from "./langfuse-setup";
-import { priceOf } from "./pricing";
+import { priced, priceOf, type Price } from "./pricing";
 
 export { flushLangfuse } from "./langfuse-setup";
 
@@ -91,14 +91,18 @@ export const chatTools = (tools: Anthropic.Tool[]) =>
 /** Usage and cost in Langfuse's shape. Cost is omitted when the price is unknown (Langfuse then infers it, if it can). */
 export function usageOf(
   usage: Anthropic.Usage,
-  price: { input: number; output: number } | null,
+  price: Price | null,
 ): { usageDetails: Record<string, number>; costDetails?: Record<string, number> } {
   const usageDetails: Record<string, number> = { input: usage.input_tokens, output: usage.output_tokens };
   if (usage.cache_read_input_tokens) usageDetails.input_cache_read = usage.cache_read_input_tokens;
   if (usage.cache_creation_input_tokens) usageDetails.input_cache_creation = usage.cache_creation_input_tokens;
   if (!price) return { usageDetails };
-  const input = usage.input_tokens * price.input, output = usage.output_tokens * price.output;
-  return { usageDetails, costDetails: { input, output, total: input + output } };
+  const c = priced(price, { input: usage.input_tokens, output: usage.output_tokens,
+    cacheRead: usage.cache_read_input_tokens ?? 0, cacheWrite: usage.cache_creation_input_tokens ?? 0 });
+  const costDetails: Record<string, number> = { input: c.input, output: c.output, total: c.total };
+  if (c.input_cache_read) costDetails.input_cache_read = c.input_cache_read;
+  if (c.input_cache_creation) costDetails.input_cache_creation = c.input_cache_creation;
+  return { usageDetails, costDetails };
 }
 
 /** The prompt of a Messages call as Langfuse shows it: chat messages, plus tool definitions when there are any. */
