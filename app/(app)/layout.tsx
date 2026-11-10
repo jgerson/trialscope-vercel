@@ -17,7 +17,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const [patients, jar] = await Promise.all([getPatients(), cookies()]);
   return (
     <AppShell patients={patients} initialPatientId={jar.get("ts_patient")?.value ?? null}
-      copilotEnabled={copilotEnabled} readOnly={config.readOnly} fulltextEnabled={config.fulltextEnabled}>
+      copilotEnabled={copilotEnabled} readOnly={config.readOnly}>
       {children}
     </AppShell>
   );

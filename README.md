@@ -55,7 +55,6 @@ All patients are synthetic. Personal account details are blurred.
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
-   | `FULLTEXT_ENABLED` | `true` turns on full-text article search (optional; off by default) |
    | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
    | `LANGFUSE_BASE_URL` | your Langfuse region, e.g. `https://us.cloud.langfuse.com` (with the keys) |
    | `LANGFUSE_TRACE_PAGE_LOADS` | `true` also sends page-load reads (patient list, notes list, row counts) to Langfuse (optional) |
@@ -77,7 +76,7 @@ Keys are only read on the server; none of them reach the browser.
 Every turbopuffer request goes through `tpCall` in `lib/tpuf-log.ts`, which writes one JSON line to the Vercel runtime
 logs: `{"tpuf":"search", "namespace":"ts-pubmed", "ms":..., "networkMs":..., "serverMs":..., "embeddingMs":..., "cache":"hot",
 "billedBytesQueried":..., "rows":[10,10], "top":[[id, score], ...], "request":{...}}`. Search the logs for `"tpuf"`.
-Labels are `search`, `list-patients`, `list-notes`, `read-article`, `count-rows`, `namespace-metadata`, `facet-counts`,
+Labels are `search`, `list-patients`, `list-notes`, `count-rows`, `namespace-metadata`, `facet-counts`,
 `cache-check`, `hint-cache-warm`, `explain-query`, `consistency-strong` and `consistency-eventual`, and for a note save
 `read-previous-note`, `write-note` and `wait-until-visible` (the visibility polling, logged once with its attempt count). Requests are logged
 without `include_attributes`, written rows only as ids and text length, and results as ids and scores, never note text.
@@ -99,7 +98,7 @@ observation (a retriever for reads, a span for writes) with its request, timings
   `turbopuffer-consistency-strong` and `turbopuffer-consistency-eventual`.
 - **Copilot** (`answer-copilot-question`, an agent, tagged `copilot`): one `generate-response` generation per model
   turn with the full prompt it was sent (system prompt, tool definitions, earlier turns, tool results), the model's
-  thinking summary and tool calls, tokens and cost; a `search-sources`, `read-patient-notes` or `read-article` tool observation for
+  thinking summary and tool calls, tokens and cost; a `search-sources` or `read-patient-notes` tool observation for
   each tool call, with the filters turbopuffer applied. Questions in one copilot conversation share a session.
 - **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
   `assess-eligibility-criteria` generation.
@@ -139,28 +138,22 @@ npm run dev                  # http://localhost:3000
 
 ## What's inside
 
-- **Search** (`/`): search either the selected patient's notes or any mix of PubMed abstracts, full-text
-  articles and trials (never both at once). Every source and retrieval mode (hybrid, vector or BM25) has a tooltip
+- **Search** (`/`): search either the selected patient's notes or PubMed abstracts, trials or both
+  (never notes and literature at once). Every source and retrieval mode (hybrid, vector or BM25) has a tooltip
   saying where the data comes from or what the mode matches. The filters panel shows only the filters for the
   sources being searched: note type and visit date for notes; status, phase, country and patient age and sex for
-  trials; year and topic for abstracts and full text. Filters set for a source that's turned off are kept but don't
+  trials; year and topic for abstracts. Filters set for a source that's turned off are kept but don't
   apply, and the page says so. Links are shareable: `/?q=...&in=notes` or `&in=pubmed,trials`.
 - **Corpus line**: under the search box, the size of each corpus two ways: an exact row count from an aggregate
   `Count` query, and stored bytes from the namespace's metadata, with the monthly storage cost at $0.33 per GB.
   Hover for how each number was fetched and how long it took. The numbers load after the page has rendered
   (`/api/corpus`), are cached for 10 minutes per server, and concurrent requests share one set of calls.
-- **Facets**: counts per trial status, per topic for abstracts and full text, or per note type, each from one
+- **Facets**: counts per trial status, per topic for abstracts, or per note type, each from one
   aggregate query with `group_by` per namespace, shown for information. The source's other active filters apply;
   all filtering itself happens in the Filters panel.
 - **Cache warm-up**: selecting a patient asks turbopuffer to warm their namespace (`hint_cache_warm`). A dot on the
   selected patient in the sidebar shows cold, warming or warm, read from a tiny count query's cache temperature
   (checked once on selection and once more a few seconds later).
-- **Full text** (off unless `FULLTEXT_ENABLED=true`; with it off, the search page, the copilot and the corpus numbers leave
-  full text out, and the copilot is never offered the `fulltext` source or `read_article`): 2,000 open-access articles from PubMed Central, stored as passages and shown one
-  result per article, labeled with the section that matched ("Matched in Methods") and how many
-  passages matched. **More from this article** expands the next two best passages, and the card shows
-  the stretch of the passage that best matches the question rather than its first lines. If a paper
-  matches as both an abstract and full text, only the higher-ranked one is shown.
 - **Explain**: select any result to see its rank by meaning and by keywords, drawn as a small
   ladder, plus its cosine distance, BM25 score, matched words, the RRF arithmetic and how it merged
   with the other sources. With nothing selected, the panel shows how the search ran: parallel
@@ -172,9 +165,8 @@ npm run dev                  # http://localhost:3000
   **Details** on a save opens "What the save did": insert or update and the diff, where the time went (network,
   turbopuffer's write, embedding, then until searchable, from turbopuffer's own write report), the row and how each
   field is stored, and a search that shows where the edited note now ranks.
-- **Copilot**: Claude with three tools: `search`, `read_patient_notes` and `read_article` (the passages around a
-  full-text match). Answers stream in, each turbopuffer call is listed as it happens, and `[N1]`, `[P1]`, `[F1]`,
-  `[T1]` tags open source cards.
+- **Copilot**: Claude with two tools, `search` and `read_patient_notes`. Answers stream in, each turbopuffer call is
+  listed as it happens, and `[N1]`, `[P1]`, `[T1]` tags open source cards.
   Each step expands to show the model's reasoning, the exact tool call, the filters turbopuffer actually applied,
   and every result returned, marked cited or not used, with **Why this result?** opening the ranking explainer.
   After the answer, a footer shows time, sources cited, tokens and approximate cost. Each question gets up to six model
@@ -205,10 +197,6 @@ npm run dev                  # http://localhost:3000
   ranked lists with reciprocal rank fusion (k = 60, the same formula as turbopuffer's
   `rerank_by: ["RRF"]`), keeping each list's rank for the explainer.
 - **Several sources** are queried in parallel and merged by rank.
-- **Full text** is chunked by section into passages of about 450–600 words (never crossing a
-  top-level section, overlapping by a sentence or two). Each passage's searchable text starts with the
-  article title and section name. A search fetches up to five passages per requested result and keeps
-  the best passage per article.
 
 ## Data
 
@@ -217,21 +205,17 @@ All data lives in turbopuffer (`aws-us-east-1`) and is loaded by scripts in
 
 | Namespace | Contents | Rows |
 | --- | --- | --- |
-| `ts-pmc` | Full-text passages from 2,000 open-access articles (1,000 oncology, 1,000 cardiology), 2024 onward | 22,664 |
 | `ts-pubmed` | Oncology and cardiology abstracts, 2015 onward | 70,990 |
 | `ts-trials` | Interventional studies, most recently updated first | 49,400 |
 | `ts-patients` | Directory of synthetic patients | 100 |
 | `ts-patient-0001` … `0100` | Chart notes, one namespace per patient | 447 seeded notes |
 
-On 10 questions whose answers sit only in an article's body, abstract search showed the answer 0 times,
-the best full-text passage 7 times, and an article's top three passages all 10 (`ingest/eval_fulltext.py`
-in the Streamlit repo).
+An earlier version also searched full-text articles, stored as passages in `ts-pmc`. That was removed to keep the
+demo simple; the namespace is still in turbopuffer, but nothing reads it.
 
 ## Known limits
 
-- Full text covers 2024 onward only; older papers are searchable by abstract.
-- When the answer shares no words with the question, a card's snippet can show the wrong stretch of a passage;
-  the copilot still reads whole passages.
+- Only abstracts are searched, so details that appear only in an article's body (methods, doses, thresholds) aren't found.
 - Trial eligibility text in the index is cut at 2,500 characters; the trial page reads the full criteria live.
 - Each patient has their own namespace, so a question across all patients needs one query per patient.
 
@@ -257,9 +241,4 @@ in the Streamlit repo).
 
 - Clinical trials: [ClinicalTrials.gov API v2](https://clinicaltrials.gov/data-api/api), U.S. National Library of Medicine.
 - Abstracts: [PubMed via NCBI E-utilities](https://www.ncbi.nlm.nih.gov/books/NBK25501/), U.S. National Library of Medicine.
-- Full text: [PubMed Central Open Access subset](https://pmc.ncbi.nlm.nih.gov/tools/textmining/), via the
-  [PMC cloud service](https://pmc.ncbi.nlm.nih.gov/tools/cloud). Only articles licensed for commercial reuse
-  (CC0, CC BY, CC BY-SA, CC BY-ND) are included; each passage stores its license. Loaded by
-  `ingest/pmc.py` in the Streamlit repo. The pilot holds 2,000 recent articles (1,000 oncology,
-  1,000 cardiology, 2024 onward) that are also in the abstracts namespace: 22,664 passages.
 - Patients and notes: synthetic, generated by `ingest/patients.py` in the Streamlit repo.

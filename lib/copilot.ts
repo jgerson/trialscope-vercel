@@ -4,29 +4,26 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getVercelOidcToken } from "@vercel/oidc";
 import { config, NS } from "./config";
 import { tracedFetch } from "./traced-fetch";
-import { buildFilters, listNotes, readArticle, search } from "./tpuf";
+import { buildFilters, listNotes, search } from "./tpuf";
 import { getActiveTraceId, startActiveObservation, startObservation, updateActiveObservation } from "@langfuse/tracing";
 import { assistantMessage, promptOf, usageOf } from "./langfuse";
 import { costOf, priceOf } from "./pricing";
 import type { Hit, Mode, Patient, SearchResponse, Usage } from "./types";
 
-const TAG: Record<Hit["kind"], string> = { notes: "N", pubmed: "P", fulltext: "F", trials: "T" };
+const TAG: Record<Hit["kind"], string> = { notes: "N", pubmed: "P", trials: "T" };
 
-// With full text off (config.fulltextEnabled), the model is never offered it: the 'fulltext' source, read_article and the
-// prompt rule about full text are all left out, so it can't ask for them.
-const toolsFor = (fulltext: boolean): Anthropic.Tool[] => [
+const TOOLS: Anthropic.Tool[] = [
   {
     name: "search",
     description:
       "Search TrialScope. Sources: 'patient' (the current patient's notes), 'pubmed' (oncology and cardiology abstracts, " +
-      "2015 onward), " + (fulltext ? "'fulltext' (passages from open-access full-text articles, best for methods, doses, " +
-      "thresholds and detailed results) " : "") + "and 'trials' (ClinicalTrials.gov interventional studies). Hybrid search (BM25 + vector, fused with " +
+      "2015 onward) and 'trials' (ClinicalTrials.gov interventional studies). Hybrid search (BM25 + vector, fused with " +
       "RRF). Put drug names, genes and NCT ids in the query text. Use filters to narrow trials by status, phase, " +
       "country, patient age and sex.",
     input_schema: {
       type: "object",
       properties: {
-        sources: { type: "array", items: { type: "string", enum: fulltext ? ["patient", "pubmed", "fulltext", "trials"] : ["patient", "pubmed", "trials"] } },
+        sources: { type: "array", items: { type: "string", enum: ["patient", "pubmed", "trials"] } },
         query: { type: "string" },
         trial_status: {
           type: "array",
@@ -41,16 +38,6 @@ const toolsFor = (fulltext: boolean): Anthropic.Tool[] => [
       required: ["sources", "query"],
     },
   },
-  ...(!fulltext ? [] : [{
-    name: "read_article",
-    description: "Read the passages around a full-text result to see its context. Pass the PMC ID and passage number shown " +
-      "in a 'fulltext' search result.",
-    input_schema: {
-      type: "object",
-      properties: { pmcid: { type: "string" }, passage: { type: "integer" } },
-      required: ["pmcid", "passage"],
-    },
-  } as Anthropic.Tool]),
   {
     name: "read_patient_notes",
     description: "Read the current patient's most recent notes in full, newest first.",
@@ -58,18 +45,13 @@ const toolsFor = (fulltext: boolean): Anthropic.Tool[] => [
   },
 ];
 
-const TOOLS = toolsFor(config.fulltextEnabled);
-
-const FULLTEXT_RULE = `
-- For questions about methods, doses, thresholds or detailed outcomes, search 'fulltext'; abstracts often leave these out.`;
-
 const SYSTEM = (patient: Patient | null) => `You are the TrialScope copilot, helping a physician search their own patient \
 notes, PubMed and ClinicalTrials.gov. All patients are synthetic demo records.
 
 Rules:
 - Every note returned for the current patient belongs to that patient. A note's author is the clinician who wrote it, \
 never the patient. Don't exclude or question a note because of who wrote it.
-- Ground every claim in tool results and cite it with the tag shown in the result, like [N2], [P1]${config.fulltextEnabled ? ", [F1]" : ""} or [T3].${config.fulltextEnabled ? FULLTEXT_RULE : ""}
+- Ground every claim in tool results and cite it with the tag shown in the result, like [N2], [P1] or [T3].
 - For trial matching, first read the patient's notes, extract diagnosis, stage, biomarkers, age, sex and location, then \
 search trials with filters (usually status Recruiting or Not yet recruiting, the patient's country, and match_patient_age_sex).
 - Say plainly that eligibility needs physician review against the full protocol. Do not give treatment advice.
@@ -142,7 +124,7 @@ function reasoningOf(content: Anthropic.ContentBlock[]): string | undefined {
 
 // Langfuse observation names for the tools. Names are an API for dashboards and evaluators: keep them stable.
 const TOOL_OBSERVATION: Record<string, string> = {
-  search: "search-sources", read_patient_notes: "read-patient-notes", read_article: "read-article",
+  search: "search-sources", read_patient_notes: "read-patient-notes",
 };
 
 /**
@@ -194,7 +176,7 @@ async function copilotLoop(
   const t0 = performance.now();
   const cites: Record<string, Hit> = {};
   const byKey = new Map<string, string>();
-  const counts = { N: 0, P: 0, F: 0, T: 0 } as Record<string, number>;
+  const counts = { N: 0, P: 0, T: 0 } as Record<string, number>;
   const tag = (h: Hit) => {
     if (!byKey.has(h.key)) {
       const t = TAG[h.kind];
@@ -207,14 +189,8 @@ async function copilotLoop(
   // Notes are labelled field by field: an unlabelled clinician's name next to a note once read as a different patient's name.
   const head = (t: string, h: Hit) => h.kind === "notes"
     ? `[${t}] date: ${h.meta[0] ?? ""} | type: ${h.meta[1] ?? ""} | author (clinician): ${h.meta[2] ?? ""} | title: ${h.title}`
-    : `[${t}] ${[h.code, ...h.meta, h.section ? `section: ${h.section}` : "", h.chunk ? `passage ${h.chunk}` : ""].filter(Boolean).join(" | ")}` +
-      ` | ${h.title}`;
-  const fmt = (t: string, h: Hit) =>
-    `${head(t, h)}\n` +
-    // Full text: give the model whole passages (the best three per article), not the on-screen snippet.
-    (h.kind === "fulltext"
-      ? String(h.raw.passage ?? h.snippet) + (h.more ?? []).map((m) => `\n\n(also passage ${m.chunk}, ${m.section}):\n${m.text}`).join("")
-      : h.snippet);
+    : `[${t}] ${[h.code, ...h.meta].filter(Boolean).join(" | ")} | ${h.title}`;
+  const fmt = (t: string, h: Hit) => `${head(t, h)}\n${h.snippet}`;
 
   async function runTool(name: string, input: Record<string, unknown>, reasoning?: string): Promise<string> {
     const t1 = performance.now();
@@ -237,17 +213,9 @@ async function copilotLoop(
       emit({ type: "step", tool: name, input, results: notes.length, ms: performance.now() - t1, returned, reasoning });
       return out.length ? `Notes for ${patient.name} (patient ${patient.id}), newest first:\n\n${out.join("\n\n")}` : "No notes.";
     }
-    if (name === "read_article") {
-      if (!config.fulltextEnabled) return "Full-text articles are not available on this deployment.";
-      const rows = await readArticle(String(input.pmcid ?? ""), Number(input.passage ?? 1), 1);
-      updateActiveObservation({ metadata: { namespace: NS.pmc, passages: rows.length } }, { asType: "tool" });
-      emit({ type: "step", tool: name, input, results: rows.length, ms: performance.now() - t1, returned: [], reasoning });
-      return rows.map((r) => `passage ${r.chunk} | ${r.section}\n${r.passage}`).join("\n\n") || "No passages found.";
-    }
     const sources = (input.sources as string[]) ?? [];
     const targets: { namespace: string; filter: unknown[] | null }[] = [];
     if (sources.includes("patient") && patient) targets.push({ namespace: NS.patient(patient.id), filter: null });
-    if (sources.includes("fulltext") && config.fulltextEnabled) targets.push({ namespace: NS.pmc, filter: buildFilters("fulltext", { yearFrom: Number(input.pubmed_year_from ?? 0) }) });
     if (sources.includes("pubmed")) targets.push({ namespace: NS.pubmed, filter: buildFilters("pubmed", { yearFrom: Number(input.pubmed_year_from ?? 0) }) });
     if (sources.includes("trials")) {
       targets.push({

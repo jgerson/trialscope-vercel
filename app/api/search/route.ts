@@ -1,7 +1,7 @@
 import { after, NextResponse } from "next/server";
 import { startActiveObservation } from "@langfuse/tracing";
 import { flushLangfuse, newTrace } from "@/lib/langfuse";
-import { config, NS } from "@/lib/config";
+import { NS } from "@/lib/config";
 import { getPatient } from "@/lib/patients";
 import { buildFilters, search } from "@/lib/tpuf";
 import type { Mode, SearchFilters, Source } from "@/lib/types";
@@ -28,7 +28,6 @@ export async function POST(req: Request) {
   const targets: { namespace: string; filter: unknown[] | null }[] = [];
   if (sources.includes("notes") && patient) targets.push({ namespace: NS.patient(patient.id), filter: buildFilters("notes", f) });
   if (sources.includes("pubmed")) targets.push({ namespace: NS.pubmed, filter: buildFilters("pubmed", f) });
-  if (sources.includes("fulltext")) targets.push({ namespace: NS.pmc, filter: buildFilters("fulltext", f) });
   if (sources.includes("trials")) targets.push({ namespace: NS.trials, filter: buildFilters("trials", f, patient) });
   if (!targets.length) return NextResponse.json({ error: "Pick a patient on the left to search their notes." }, { status: 400 });
 
@@ -51,15 +50,17 @@ export async function POST(req: Request) {
   }
 }
 
-const ALL: Source[] = ["notes", "pubmed", "fulltext", "trials"];
+const ALL: Source[] = ["notes", "pubmed", "trials"];
 
-/** The sources to search. Older links send `scope` instead: "patient", "literature", "fulltext", "trials" or "all". */
+/**
+ * The sources to search. Older links send `scope` instead: "patient", "literature", "trials" or "all"
+ * (and "fulltext", from when full-text articles were searchable, which now means abstracts).
+ */
 function parseSources(sources: unknown, scope?: string): Source[] {
   if (Array.isArray(sources)) {
-    const picked = ALL.filter((s) => sources.includes(s) && (s !== "fulltext" || config.fulltextEnabled));
+    const picked = ALL.filter((s) => sources.includes(s));
     return picked.includes("notes") ? ["notes"] : picked;
   }
-  if (scope === "fulltext" && !config.fulltextEnabled) return ["pubmed"];
-  return ({ patient: ["notes"], literature: ["pubmed"], fulltext: ["fulltext"], trials: ["trials"] } as Record<string, Source[]>)[scope ?? ""]
-    ?? (config.fulltextEnabled ? ["pubmed", "fulltext", "trials"] : ["pubmed", "trials"]);
+  return ({ patient: ["notes"], literature: ["pubmed"], fulltext: ["pubmed"], trials: ["trials"] } as Record<string, Source[]>)[scope ?? ""]
+    ?? ["pubmed", "trials"];
 }

@@ -1,9 +1,9 @@
 // Types shared by the server routes and the browser.
 
-export type Kind = "notes" | "pubmed" | "fulltext" | "trials";
+export type Kind = "notes" | "pubmed" | "trials";
 export type Mode = "hybrid" | "vector" | "bm25";
 /** A searchable source. "notes" is the selected patient's own namespace; the others are shared corpora. */
-export type Source = "notes" | "pubmed" | "fulltext" | "trials";
+export type Source = "notes" | "pubmed" | "trials";
 
 export interface Patient {
   id: string;
@@ -51,12 +51,6 @@ export interface Hit {
   vector: Signal | null;
   bm25: Signal | null;
   terms: string[];
-  /** Full-text results only: the section the best passage came from, and how many passages matched. */
-  section?: string | null;
-  passages?: number;
-  chunk?: number;
-  /** Full-text results only: the next-best passages from the same article (up to two). */
-  more?: { section: string; snippet: string; chunk: number; text: string }[];
   raw: Record<string, unknown>;
 }
 
@@ -118,7 +112,6 @@ export interface SearchResponse {
 export const KIND_LABEL: Record<Kind, string> = {
   notes: "Patient note",
   pubmed: "PubMed",
-  fulltext: "Full text",
   trials: "Clinical trial",
 };
 

@@ -11,13 +11,11 @@ import { cx, highlight, Segmented, SourceTag, Tip } from "./ui";
 
 const EXAMPLES = ["trastuzumab cardiotoxicity monitoring", "EGFR exon 19 resistance after osimertinib",
   "pulsed field ablation for atrial fibrillation", "NCT03418961"];
-// A question whose answer sits in an article's methods, so it only makes sense with full text on.
-const FULLTEXT_EXAMPLE = "how was LVEF measured and what threshold defined cardiotoxicity";
 const STATUSES = ["Recruiting", "Not yet recruiting", "Active not recruiting", "Completed", "Enrolling by invitation", "Terminated"];
 const PHASES = ["Early phase 1", "Phase 1", "Phase 2", "Phase 3", "Phase 4"];
 const NOTE_TYPES = ["Visit note", "Result", "Phone call", "Treatment plan", "Other"];
-const ALL_LITERATURE: Source[] = ["pubmed", "fulltext", "trials"];
-const LIT_LABEL: Record<Source, string> = { notes: "Patient notes", pubmed: "Abstracts", fulltext: "Full text", trials: "Trials" };
+const LITERATURE: Source[] = ["pubmed", "trials"];
+const LIT_LABEL: Record<Source, string> = { notes: "Patient notes", pubmed: "Abstracts", trials: "Trials" };
 const MODES: { value: Mode; label: string; hint: string }[] = [
   { value: "hybrid", label: "Hybrid", hint: "Runs a meaning search and a keyword search in one request and merges the two ranked lists (reciprocal rank fusion). The best default." },
   { value: "vector", label: "Vector", hint: "Matches meaning: turbopuffer embeds your words and finds the closest documents, so it catches paraphrases and synonyms." },
@@ -27,13 +25,13 @@ const MODES: { value: Mode; label: string; hint: string }[] = [
 type Area = "notes" | "literature";
 
 /** Sources from the URL: `in=notes` or `in=pubmed,trials`; older links use `scope`. */
-function initialSources(params: URLSearchParams, LITERATURE: Source[]): { area: Area; lit: Source[] } {
+function initialSources(params: URLSearchParams): { area: Area; lit: Source[] } {
   const inParam = params.get("in");
   if (inParam === "notes" || params.get("scope") === "patient") return { area: "notes", lit: LITERATURE };
   const picked = (inParam ?? "").split(",").filter((s): s is Source => LITERATURE.includes(s as Source));
   if (picked.length) return { area: "literature", lit: picked };
-  const legacy = ({ literature: ["pubmed"], fulltext: ["fulltext"], trials: ["trials"] } as Record<string, Source[]>)[params.get("scope") ?? ""]
-    ?.filter((s) => LITERATURE.includes(s));
+  // "fulltext" is from when full-text articles were searchable; it now opens abstracts.
+  const legacy = ({ literature: ["pubmed"], fulltext: ["pubmed"], trials: ["trials"] } as Record<string, Source[]>)[params.get("scope") ?? ""];
   return { area: "literature", lit: legacy?.length ? legacy : LITERATURE };
 }
 
@@ -43,11 +41,10 @@ export function SearchView() {
   const stats = useCorpus();
   const params = useSearchParams();
   const router = useRouter();
-  const { patient, fulltextEnabled } = useApp();
-  const LITERATURE = fulltextEnabled ? ALL_LITERATURE : ALL_LITERATURE.filter((s) => s !== "fulltext");
-  const examples = fulltextEnabled ? [...EXAMPLES.slice(0, 2), FULLTEXT_EXAMPLE, ...EXAMPLES.slice(2)] : EXAMPLES;
+  const { patient } = useApp();
+  const examples = EXAMPLES;
   const [input, setInput] = useState(params.get("q") ?? "");
-  const [{ area, lit }, setSources] = useState(() => initialSources(params, LITERATURE));
+  const [{ area, lit }, setSources] = useState(() => initialSources(params));
   const [mode, setMode] = useState<Mode>((params.get("mode") as Mode) || "hybrid");
   const [filters, setFilters] = useState<SearchFilters>({});
   const [topK, setTopK] = useState(10);
@@ -110,12 +107,12 @@ export function SearchView() {
 
   const hit = data?.hits.find((h) => h.key === selected) ?? null;
   const groups = filterGroups(filters);
-  const activeFilters = sources.reduce((n, s) => n + (groups[s] ?? 0), 0) + (sources.includes("fulltext") && sources.includes("pubmed") ? -groups.pubmed : 0);
+  const activeFilters = sources.reduce((n, s) => n + (groups[s] ?? 0), 0);
   const idle = Object.entries(groups).filter(([s, n]) => n && !sources.includes(s as Source)).map(([s]) => LIT_LABEL[s as Source]);
-  const idleNames = [...new Set(idle.map((n) => (n === "Abstracts" || n === "Full text" ? "abstracts and full text" : n.toLowerCase())))];
+  const idleNames = idle.map((n) => n.toLowerCase());
 
   const notesLabel = patient ? `${patient.name.split(" ")[0]}'s notes` : "Patient notes";
-  const corpusTotal = ["pubmed", "fulltext", "trials"].reduce((n, k) => n + (stats[k]?.bytes ?? 0), 0);
+  const corpusTotal = ["pubmed", "trials"].reduce((n, k) => n + (stats[k]?.bytes ?? 0), 0);
 
   return (
     <div className="mx-auto max-w-[1360px] px-5 pb-20 sm:px-8 lg:px-10">
@@ -126,7 +123,7 @@ export function SearchView() {
               Search the chart or <em className="italic text-slate">the literature</em>.
             </h1>
             <p className="mt-4 max-w-[62ch] text-[16px] leading-relaxed text-slate">
-              A patient’s own notes, or PubMed{fulltextEnabled ? ", full-text articles" : ""} and clinical trials, ranked by turbopuffer. Exact terms
+              A patient’s own notes, or PubMed and clinical trials, ranked by turbopuffer. Exact terms
               match on keywords, questions match on meaning.
             </p>
           </div>
@@ -149,7 +146,7 @@ export function SearchView() {
             { value: "notes", label: notesLabel, hint: patient
               ? `Only ${patient.name}'s chart notes, in their own turbopuffer namespace (ts-patient-${patient.id}). Synthetic, written by a script.`
               : "Pick a patient on the left to search their chart notes. Each patient has their own turbopuffer namespace." },
-            { value: "literature", label: "Literature and trials", hint: `Public medical literature and trials. Pick any mix of ${fulltextEnabled ? "abstracts, full text and trials" : "abstracts and trials"}.` },
+            { value: "literature", label: "Literature and trials", hint: "Public medical literature and trials. Pick abstracts, trials or both." },
           ]} />
           {area === "literature" && (
             <div role="group" aria-label="Sources" className="inline-flex flex-wrap gap-1.5">
@@ -158,7 +155,7 @@ export function SearchView() {
                   <button type="button" aria-pressed={lit.includes(s)} onClick={() => toggleLit(s)}
                     className={cx("inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-medium",
                       lit.includes(s) ? "border-ink bg-ink text-white" : "border-line bg-surface text-slate hover:text-ink")}>
-                    <span aria-hidden className={cx("size-1.5 rounded-full", { pubmed: "bg-pubmed", fulltext: "bg-fulltext", trials: "bg-trials", notes: "bg-notes" }[s],
+                    <span aria-hidden className={cx("size-1.5 rounded-full", { pubmed: "bg-pubmed", trials: "bg-trials", notes: "bg-notes" }[s],
                       lit.includes(s) && "ring-2 ring-white/70")} />
                     {LIT_LABEL[s]}
                   </button>
@@ -237,18 +234,17 @@ function sourceHint(s: Source, stats: Record<string, CorpusStat>) {
   const n = (k: string) => (stats[k]?.rows ? stats[k].rows.toLocaleString() : null);
   return {
     pubmed: `${n("pubmed") ?? "About 71,000"} oncology and cardiology abstracts from PubMed (U.S. National Library of Medicine), 2015 onward.`,
-    fulltext: `${n("fulltext") ?? "About 22,700"} passages from 2,000 open-access articles in PubMed Central, 2024 onward, shown one result per article.`,
     trials: `${n("trials") ?? "About 49,400"} interventional studies from ClinicalTrials.gov, most recently updated first.`,
     notes: "",
   }[s];
 }
 
-/** How many filters are set per source. Abstracts and full text share theirs. */
+/** How many filters are set per source. */
 function filterGroups(f: SearchFilters): Record<Source, number> {
   const lit = [(f.yearFrom ?? 2015) > 2015, f.topic].filter(Boolean).length;
   return {
     trials: [f.status?.length, f.phases?.length, f.country, f.matchPatient].filter(Boolean).length,
-    pubmed: lit, fulltext: lit,
+    pubmed: lit,
     notes: [f.noteTypes?.length, f.visitFrom, f.visitTo].filter(Boolean).length,
   };
 }
@@ -265,7 +261,7 @@ function CorpusLine({ area, patient, stats, total }: {
     );
   }
   if (!stats.pubmed) return null;
-  const rows = ([["pubmed", "abstracts"], ["fulltext", "full-text passages"], ["trials", "trials"]] as [string, string][])
+  const rows = ([["pubmed", "abstracts"], ["trials", "trials"]] as [string, string][])
     .filter(([k]) => stats[k]);
   return (
     <div className="mt-2.5 text-[12.5px] text-slate">
@@ -291,7 +287,7 @@ function CorpusLine({ area, patient, stats, total }: {
   );
 }
 
-const FACET_LABEL: Record<Facet["source"], string> = { trials: "Trials by status", pubmed: "Abstracts by topic", fulltext: "Full text by topic", notes: "Notes by type" };
+const FACET_LABEL: Record<Facet["source"], string> = { trials: "Trials by status", pubmed: "Abstracts by topic", notes: "Notes by type" };
 
 /** Counts per value from one grouped aggregate query per source, for information. Filtering happens in the Filters panel. */
 function FacetRow({ facets }: { facets: Facet[] }) {
@@ -313,19 +309,12 @@ function FacetRow({ facets }: { facets: Facet[] }) {
   );
 }
 
-function sectionName(section: string) {
-  const top = section.split(" › ")[0];
-  return top === "Body" ? "Main text" : top;
-}
-
 function queryWords(q: string) {
   return [...new Set(q.toLowerCase().match(/[a-z0-9-]{4,}/g) ?? [])].filter((w) =>
     !["after", "before", "with", "from", "that", "this", "what", "does", "about", "patient", "patients"].includes(w));
 }
 
 function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: string[]; selected: boolean; onSelect: () => void }) {
-  const [showMore, setShowMore] = useState(false);
-  const more = hit.more ?? [];
   return (
     <article tabIndex={0} onClick={onSelect}
       onKeyDown={(e) => { if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) { e.preventDefault(); onSelect(); } }}
@@ -338,39 +327,16 @@ function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: strin
         <span className="ml-auto tabular-nums">#{hit.overall}</span>
       </div>
       <h3 className="mt-2 text-[16.5px] font-semibold leading-snug tracking-[-0.01em] text-ink">{highlight(hit.title, terms)}</h3>
-      {hit.kind === "fulltext" && hit.section && (
-        <p className="mt-1.5 text-[12.5px] text-fulltext">
-          Matched in <span className="font-semibold">{sectionName(hit.section)}</span>
-          {hit.section.includes(" › ") && <span className="text-slate"> · {hit.section.split(" › ").slice(1).join(" › ")}</span>}
-          {(hit.passages ?? 1) > 1 && <span className="text-slate"> · {hit.passages} passages matched</span>}
-        </p>
-      )}
-      <p className={cx("mt-1.5 max-w-[82ch] text-[14px] leading-relaxed text-ink-2",
-        hit.kind === "fulltext" && "border-l-2 border-fulltext-soft pl-3")}>{highlight(hit.snippet, terms)}</p>
-      {showMore && more.map((m) => (
-        <div key={m.chunk} className="mt-3 animate-fade-in">
-          <p className="text-[12.5px] text-fulltext">
-            <span className="font-semibold">{sectionName(m.section)}</span>
-            {m.section.includes(" › ") && <span className="text-slate"> · {m.section.split(" › ").slice(1).join(" › ")}</span>}
-          </p>
-          <p className="mt-1 max-w-[82ch] border-l-2 border-fulltext-soft pl-3 text-[14px] leading-relaxed text-ink-2">{highlight(m.snippet, terms)}</p>
-        </div>
-      ))}
+      <p className="mt-1.5 max-w-[82ch] text-[14px] leading-relaxed text-ink-2">{highlight(hit.snippet, terms)}</p>
       <div className="mt-3 flex items-center gap-5 text-[13px]">
         <button onClick={(e) => { e.stopPropagation(); onSelect(); }} aria-expanded={selected}
           className={cx("inline-flex items-center gap-1.5 font-medium", selected ? "text-accent" : "text-slate hover:text-accent")}>
           <Info size={15} />Explain
         </button>
-        {more.length > 0 && (
-          <button onClick={(e) => { e.stopPropagation(); setShowMore((v) => !v); }} aria-expanded={showMore}
-            className="inline-flex items-center gap-1.5 font-medium text-fulltext hover:underline underline-offset-4">
-            {showMore ? "Show less" : `${more.length} more from this article`}
-          </button>
-        )}
         {hit.url && (
           <a href={hit.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}
             className="inline-flex items-center gap-1 font-medium text-slate hover:text-accent">
-            Open on {hit.kind === "pubmed" ? "PubMed" : hit.kind === "fulltext" ? "PubMed Central" : "ClinicalTrials.gov"}<ArrowUpRight size={14} />
+            Open on {hit.kind === "pubmed" ? "PubMed" : "ClinicalTrials.gov"}<ArrowUpRight size={14} />
           </a>
         )}
         {hit.kind === "trials" && hit.code && (
@@ -417,8 +383,8 @@ function FiltersButton({ filters, setFilters, topK, setTopK, active, sources, pa
     on ? "border-ink bg-ink text-white" : "border-line text-ink-2 hover:border-line-2");
   const notes = sources.includes("notes");
   const trials = sources.includes("trials");
-  const lit = sources.includes("pubmed") || sources.includes("fulltext");
-  const litName = sources.includes("pubmed") && sources.includes("fulltext") ? "Abstracts and full text" : sources.includes("pubmed") ? "Abstracts" : "Full text";
+  const lit = sources.includes("pubmed");
+  const litName = "Abstracts";
   // Only the filters for the sources being searched are cleared; the rest are kept for when those sources come back.
   const cleared: SearchFilters = {
     ...draft,

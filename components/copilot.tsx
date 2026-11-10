@@ -22,7 +22,7 @@ interface Turn {
   traceId?: string;
 }
 
-const TAG_RE = /\[([NPFT]\d+)\]/g;
+const TAG_RE = /\[([NPT]\d+)\]/g;
 /** Tags the finished answer cites, or undefined while it is still being written. */
 const citedIn = (t: Turn) => (t.seconds == null ? undefined : new Set([...t.answer.matchAll(TAG_RE)].map((m) => m[1])));
 
@@ -157,15 +157,6 @@ export function Copilot({ patient }: { patient: Patient }) {
 function StepRow({ step, cited }: { step: Step; cited?: Set<string> }) {
   const [explain, setExplain] = useState<Hit | null>(null);
   const isNotes = step.tool === "read_patient_notes";
-  if (step.tool === "read_article") {
-    return (
-      <li className="flex gap-2.5 text-[12.5px] leading-relaxed text-slate">
-        <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-md bg-fulltext-soft text-fulltext"><BookOpen size={12} /></span>
-        <span>Read around passage {String(step.input.passage)} of {String(step.input.pmcid)}
-          <span className="tabular-nums">, {step.results} passages in {Math.round(step.ms)} ms</span></span>
-      </li>
-    );
-  }
   const usedCount = cited && step.returned ? step.returned.filter((r) => cited.has(r.tag)).length : null;
   const sources = (step.input.sources as string[] | undefined)?.join(", ");
   const filters = ["trial_status", "trial_phases", "country"].map((k) => step.input[k]).filter(Boolean).flat().join(", ");
@@ -326,7 +317,7 @@ function Feedback({ traceId }: { traceId: string }) {
 }
 
 function Answer({ text, cites }: { text: string; cites: Record<string, Hit> }) {
-  const linked = text.replace(/\[([NPFT]\d+)\]/g, (m, tag) => (cites[tag] || !Object.keys(cites).length ? `[${tag}](#cite-${tag})` : m));
+  const linked = text.replace(/\[([NPT]\d+)\]/g, (m, tag) => (cites[tag] || !Object.keys(cites).length ? `[${tag}](#cite-${tag})` : m));
   return (
     <div className="prose-ts mt-3">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
@@ -352,7 +343,7 @@ function Cite({ tag, hit }: { tag: string; hit?: Hit }) {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const btn = useRef<HTMLButtonElement>(null);
   const card = useRef<HTMLSpanElement>(null);
-  const color = { N: "bg-notes-soft text-notes", P: "bg-pubmed-soft text-pubmed", F: "bg-fulltext-soft text-fulltext" }[tag[0]]
+  const color = { N: "bg-notes-soft text-notes", P: "bg-pubmed-soft text-pubmed" }[tag[0]]
     ?? "bg-trials-soft text-trials";
 
   useLayoutEffect(() => {
@@ -388,7 +379,6 @@ function Cite({ tag, hit }: { tag: string; hit?: Hit }) {
             <SourceTag kind={hit.kind} />
             <span className="mt-1 block text-[13px] font-semibold leading-snug text-ink">{hit.title}</span>
             <span className="mt-1 block text-[12px] text-slate">{[hit.code, ...hit.meta].filter(Boolean).join(", ")}</span>
-            {hit.section && <span className="mt-1 block text-[12px] text-fulltext">From {hit.section}</span>}
             {hit.url && (
               <a href={hit.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-[12.5px] font-semibold text-accent">
                 Open the full record<ArrowUpRight size={13} />

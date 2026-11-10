@@ -18,8 +18,6 @@ interface Ctx {
   openPalette: () => void;
   copilotEnabled: boolean;
   readOnly: boolean;
-  /** Full-text article search is offered (FULLTEXT_ENABLED). */
-  fulltextEnabled: boolean;
 }
 type CacheState = { state: "checking" | "cold" | "warming" | "warm"; temperature: string | null } | null;
 
@@ -33,9 +31,9 @@ export const useApp = () => {
 const stageText = (p: Patient) =>
   !p.stage ? "" : /^(NYHA|Post|Parox|Persis)/.test(p.stage) ? p.stage : `stage ${p.stage}`;
 
-export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly, fulltextEnabled, children }: {
+export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly, children }: {
   patients: Patient[]; initialPatientId: string | null; copilotEnabled: boolean; readOnly: boolean;
-  fulltextEnabled: boolean; children: React.ReactNode;
+  children: React.ReactNode;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -88,8 +86,8 @@ export function AppShell({ patients, initialPatientId, copilotEnabled, readOnly,
   }, [patientId]);
 
   const ctx = useMemo<Ctx>(() => ({
-    patients, patient, selectPatient, cache, openPalette: () => setPaletteOpen(true), copilotEnabled, readOnly, fulltextEnabled,
-  }), [patients, patient, selectPatient, cache, copilotEnabled, readOnly, fulltextEnabled]);
+    patients, patient, selectPatient, cache, openPalette: () => setPaletteOpen(true), copilotEnabled, readOnly,
+  }), [patients, patient, selectPatient, cache, copilotEnabled, readOnly]);
 
   return (
     <PatientCtx.Provider value={ctx}>
