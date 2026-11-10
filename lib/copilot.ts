@@ -33,7 +33,7 @@ const TOOLS: Anthropic.Tool[] = [
         country: { type: "string", description: "e.g. 'United States'" },
         match_patient_age_sex: { type: "boolean" },
         pubmed_year_from: { type: "integer" },
-        top_k: { type: "integer" },
+        top_k: { type: "integer", description: "Results per source, 10 to 20. Defaults to 10." },
       },
       required: ["sources", "query"],
     },
@@ -227,7 +227,9 @@ async function copilotLoop(
       });
     }
     if (!targets.length) return "No valid sources.";
-    const res = await search(targets, String(input.query ?? ""), mode, Number(input.top_k ?? 8));
+    // At least 10 per source: with abstracts as the only literature, a thin search leaves the model hedging.
+    const topK = Math.min(20, Math.max(10, Number(input.top_k) || 10));
+    const res = await search(targets, String(input.query ?? ""), mode, topK);
     updateActiveObservation({
       metadata: {
         mode, hits: res.hits.length, shownToModel: Math.min(res.hits.length, 15),
