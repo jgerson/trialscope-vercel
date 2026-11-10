@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowUp, ArrowUpRight, BookOpen, Check, ChevronRight, FileText, Loader2, Sparkles } from "lucide-react";
+import { ArrowUp, ArrowUpRight, BookOpen, Check, ChevronRight, FileText, Loader2, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { Hit, Patient, SearchResponse, Usage } from "@/lib/types";
 import { ExplainDialog } from "./explain";
 import { useApp } from "./app-shell";
@@ -18,6 +18,8 @@ interface Step {
 interface Turn {
   q: string; answer: string; steps: Step[]; cites: Record<string, Hit>; seconds?: number; error?: string; pending: boolean;
   usage?: Usage; notice?: string; finished?: boolean;
+  /** Langfuse trace id for this answer; present only when tracing is on. */
+  traceId?: string;
 }
 
 const TAG_RE = /\[([NPFT]\d+)\]/g;
@@ -78,6 +80,7 @@ export function Copilot({ patient }: { patient: Patient }) {
           else if (ev.type === "usage") update((t) => ({ ...t, usage: ev.usage }));
           else if (ev.type === "done") update((t) => ({ ...t, seconds: ev.seconds, finished: true }));
           else if (ev.type === "notice") update((t) => ({ ...t, notice: ev.message }));
+          else if (ev.type === "trace") update((t) => ({ ...t, traceId: ev.id }));
         }
       }
     } catch (e) {
@@ -280,9 +283,45 @@ function AnswerFooter({ turn, cited }: { turn: Turn; cited?: Set<string> }) {
     u && money(u.cost) && `≈ ${money(u.cost)}`,
   ].filter(Boolean);
   return (
-    <p className="mt-2 text-[12px] text-slate" title={u ? `${u.inTokens.toLocaleString()} input and ${u.outTokens.toLocaleString()} output tokens at AI Gateway list prices` : undefined}>
-      {parts.join(" · ")}
-    </p>
+    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+      <p className="text-[12px] text-slate" title={u ? `${u.inTokens.toLocaleString()} input and ${u.outTokens.toLocaleString()} output tokens at AI Gateway list prices` : undefined}>
+        {parts.join(" · ")}
+      </p>
+      {turn.traceId && <Feedback traceId={turn.traceId} />}
+    </div>
+  );
+}
+
+/** Thumbs up or down on an answer, sent to Langfuse as a "user-feedback" score on the answer's trace. */
+function Feedback({ traceId }: { traceId: string }) {
+  const [vote, setVote] = useState<1 | 0 | null>(null);
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  async function send(value: 1 | 0) {
+    if (state === "saving" || vote === value) return;
+    setVote(value);
+    setState("saving");
+    try {
+      const res = await fetch("/api/feedback", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ traceId, value }),
+      });
+      setState(res.ok ? "saved" : "failed");
+    } catch {
+      setState("failed");
+    }
+  }
+  const btn = (value: 1 | 0, label: string, Icon: typeof ThumbsUp) => (
+    <button type="button" aria-label={label} aria-pressed={vote === value} title={label} onClick={() => send(value)}
+      className={`rounded-md p-1 transition-colors ${vote === value ? "bg-accent-soft text-accent" : "text-slate hover:bg-paper hover:text-ink"}`}>
+      <Icon size={14} />
+    </button>
+  );
+  return (
+    <div className="flex items-center gap-1 text-[12px] text-slate">
+      {state === "saved" && <span>Thanks</span>}
+      {state === "failed" && <span>Couldn’t save</span>}
+      {btn(1, "Good answer", ThumbsUp)}
+      {btn(0, "Bad answer", ThumbsDown)}
+    </div>
   );
 }
 

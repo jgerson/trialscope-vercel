@@ -4,12 +4,15 @@ import "server-only";
 import Turbopuffer from "@turbopuffer/turbopuffer";
 import { config, NS, RRF_K } from "./config";
 import { tpCall } from "./tpuf-log";
+import { tracedFetch } from "./traced-fetch";
 import type { CorpusStat, Facet, Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
   if (!config.tpufKey) throw new Error("TURBOPUFFER_API_KEY is not set");
-  _client ??= new Turbopuffer({ apiKey: config.tpufKey, region: config.tpufRegion, maxRetries: 3 });
+  // tracedFetch adds an http span per request inside traced actions (see lib/traced-fetch.ts).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  _client ??= new Turbopuffer({ apiKey: config.tpufKey, region: config.tpufRegion, maxRetries: 3, fetch: tracedFetch as any });
   return _client;
 }
 

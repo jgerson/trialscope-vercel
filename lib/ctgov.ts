@@ -2,6 +2,7 @@
 // criteria only inside its search text, cut to 2,500 characters, and stores countries but not sites, so the eligibility
 // checklist and the sites map read the full, current record from the source instead (no schema change).
 import "server-only";
+import { tracedFetch } from "./traced-fetch";
 
 export interface Site {
   facility: string;
@@ -41,7 +42,7 @@ const pretty = (s: string) => s.toLowerCase().replace(/_/g, " ").replace(/^\w/, 
 /** The trial, or null when the id is malformed or ClinicalTrials.gov has no such study. Cached for an hour. */
 export async function getTrial(nct: string): Promise<Trial | null> {
   if (!NCT_RE.test(nct)) return null;
-  const res = await fetch(`https://clinicaltrials.gov/api/v2/studies/${nct}?fields=${FIELDS}`, {
+  const res = await tracedFetch(`https://clinicaltrials.gov/api/v2/studies/${nct}?fields=${FIELDS}`, {
     next: { revalidate: 3600 },
     signal: AbortSignal.timeout(10_000),
   });

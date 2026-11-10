@@ -75,12 +75,13 @@ Keys are only read on the server; none of them reach the browser.
 ### Logging every turbopuffer call
 
 Every turbopuffer request goes through `tpCall` in `lib/tpuf-log.ts`, which writes one JSON line to the Vercel runtime
-logs: `{"tpuf":"search", "namespace":"ts-pubmed", "ms":..., "serverMs":..., "embeddingMs":..., "cache":"hot",
+logs: `{"tpuf":"search", "namespace":"ts-pubmed", "ms":..., "networkMs":..., "serverMs":..., "embeddingMs":..., "cache":"hot",
 "billedBytesQueried":..., "rows":[10,10], "top":[[id, score], ...], "request":{...}}`. Search the logs for `"tpuf"`.
 Labels are `search`, `list-patients`, `list-notes`, `read-article`, `count-rows`, `namespace-metadata`, `facet-counts`,
 `cache-check`, `hint-cache-warm`, `explain-query`, `consistency-strong` and `consistency-eventual`, and for a note save
 `read-previous-note`, `write-note` and `wait-until-visible` (the visibility polling, logged once with its attempt count). Requests are logged
 without `include_attributes`, written rows only as ids and text length, and results as ids and scores, never note text.
+`networkMs` is `ms` minus turbopuffer's own `serverMs`: time on the network and in the client.
 Errors are logged too (a 404 just means a patient has no notes yet). With Langfuse on, each line carries the `traceId`.
 Vercel keeps runtime logs for an hour on Hobby and a day on Pro.
 
@@ -102,6 +103,20 @@ observation (a retriever for reads, a span for writes) with its request, timings
   each tool call, with the filters turbopuffer applied. Questions in one copilot conversation share a session.
 - **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
   `assess-eligibility-criteria` generation.
+
+Inside these traces you can also find:
+
+- **Network spans.** Every outgoing HTTP call (turbopuffer, the model through AI Gateway or Anthropic, ClinicalTrials.gov)
+  is an `http <METHOD> <host>` span under the step that made it, with path, status, time to response headers and
+  sizes. Retries show as separate spans. Bodies, query strings and headers are never recorded. This is a custom `fetch`
+  passed to the SDK clients (`lib/traced-fetch.ts`), so trace names and structure stay the same; outside a trace it's plain `fetch`.
+- **Filterable turbopuffer details.** Each `turbopuffer-<label>` observation has flat metadata you can filter and chart
+  on in Langfuse: `label`, `op`, `namespace`, `ms`, `serverMs`, `networkMs`, `embeddingMs`, `cache`, `rowsTotal`
+  (`rowsVector`/`rowsBm25` for hybrid), `billedBytesQueried`, `billedBytesWritten` and `slow`. Calls of a second or more
+  are marked level WARNING with a "slow turbopuffer call" message.
+- **User feedback.** Thumbs up/down under each copilot answer posts to `/api/feedback`, which records a `user-feedback`
+  score (BOOLEAN, 1 good, 0 bad) on that answer's trace through Langfuse's public scores API. Changing the vote replaces
+  the score. The buttons only appear when tracing is on.
 
 Traces carry the Clerk user id, the Vercel environment (`production`, `preview`, `development`) and the commit as
 the release. Costs are AI Gateway list prices. The setup is in `lib/langfuse-setup.ts` and `lib/langfuse.ts`; without
@@ -228,12 +243,12 @@ in the Streamlit repo).
 | `app/(app)/patients/[id]/page.tsx` | Patient workspace |
 | `app/(app)/trials/[nct]/page.tsx` | Trial page: eligibility checklist and nearby sites |
 | `app/sign-in/` | Clerk sign-in page (no sign-up page: accounts are created in Clerk's dashboard) |
-| `app/api/search`, `api/notes`, `api/copilot`, `api/eligibility` | Server routes (the copilot streams NDJSON) |
+| `app/api/search`, `api/notes`, `api/copilot`, `api/eligibility`, `api/feedback` | Server routes (the copilot streams NDJSON; feedback becomes a Langfuse score) |
 | `lib/tpuf.ts` | turbopuffer: search modes, RRF, filters, notes, patients |
 | `lib/tpuf-log.ts` | Logs every turbopuffer call to Vercel logs and Langfuse |
 | `lib/copilot.ts` | Claude tool-use loop and citations |
 | `lib/eligibility.ts`, `lib/ctgov.ts`, `lib/places.ts` | Eligibility checklist, live ClinicalTrials.gov reads, site distances |
-| `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `instrumentation.ts` | Optional Langfuse tracing |
+| `lib/langfuse.ts`, `lib/langfuse-setup.ts`, `lib/traced-fetch.ts`, `instrumentation.ts` | Optional Langfuse tracing, including network spans |
 | `components/` | App shell and ⌘K, search view, explain panel, workspace and save details, copilot, trial view and sites map, sign-in frame |
 | `proxy.ts` | Clerk sign-in check before every request |
 | `walkthrough/` | Ten-minute turbopuffer notebook (Colab) |

@@ -3,8 +3,9 @@ import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import { getVercelOidcToken } from "@vercel/oidc";
 import { config, NS } from "./config";
+import { tracedFetch } from "./traced-fetch";
 import { buildFilters, listNotes, readArticle, search } from "./tpuf";
-import { startActiveObservation, startObservation, updateActiveObservation } from "@langfuse/tracing";
+import { getActiveTraceId, startActiveObservation, startObservation, updateActiveObservation } from "@langfuse/tracing";
 import { assistantMessage, promptOf, usageOf } from "./langfuse";
 import { costOf, priceOf } from "./pricing";
 import type { Hit, Mode, Patient, SearchResponse, Usage } from "./types";
@@ -99,16 +100,18 @@ export type CopilotEvent =
   | { type: "usage"; usage: Usage }
   | { type: "done"; seconds: number }
   // A limit stopped the answer early: shown under it so it never just stops silently.
-  | { type: "notice"; message: string };
+  | { type: "notice"; message: string }
+  // The Langfuse trace for this answer, so the thumbs up/down can be attached to it as a score.
+  | { type: "trace"; id: string };
 
 const GATEWAY_URL = "https://ai-gateway.vercel.sh";
 
 // Direct to Anthropic when ANTHROPIC_API_KEY is set; otherwise through AI Gateway with its key or the Vercel OIDC token.
 export async function copilotClient(): Promise<Anthropic> {
-  if (config.anthropicKey) return new Anthropic({ apiKey: config.anthropicKey });
+  if (config.anthropicKey) return new Anthropic({ apiKey: config.anthropicKey, fetch: tracedFetch });
   const authToken = config.gatewayKey || (await getVercelOidcToken());
   // One retry and a 40s cap per call, so a rate limit or a stuck model shows up as an error instead of a silent timeout.
-  return new Anthropic({ baseURL: GATEWAY_URL, authToken, maxRetries: 1, timeout: 40_000 });
+  return new Anthropic({ baseURL: GATEWAY_URL, authToken, maxRetries: 1, timeout: 40_000, fetch: tracedFetch });
 }
 
 // One JSON line per step in the Vercel runtime logs, to see where a slow answer spent its time.
@@ -161,6 +164,12 @@ export async function runCopilot(
       input: question,
       metadata: { patientId: patient?.id ?? null, mode, model: config.copilotModel, earlierMessages: messages.length - 1 },
     });
+    try {
+      const id = getActiveTraceId();
+      if (id) emit({ type: "trace", id });
+    } catch {
+      // no trace id: feedback buttons stay hidden
+    }
     try {
       const r = await copilotLoop(messages, patient, mode, emit);
       agent.update({

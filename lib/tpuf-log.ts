@@ -26,6 +26,24 @@ type Opts<T> = {
 };
 
 const tracePageLoads = process.env.LANGFUSE_TRACE_PAGE_LOADS === "true";
+// Calls at least this slow are marked WARNING in Langfuse, so they can be filtered by level.
+const SLOW_MS = 1000;
+
+/**
+ * Flat, filterable metadata for a turbopuffer observation: Langfuse can filter and chart on these keys (namespace, cache,
+ * timings, rows, billed bytes), where nested output is only readable by opening the trace.
+ */
+function searchable(label: string, op: TpufOp, namespace: string, ms: number, networkMs: number | undefined,
+  s: Record<string, unknown>): Record<string, unknown> {
+  const rows = Array.isArray(s.rows) ? (s.rows as number[]) : typeof s.rows === "number" ? [s.rows] : [];
+  const out: Record<string, unknown> = {
+    label, op, namespace, ms, networkMs, serverMs: s.serverMs, embeddingMs: s.embeddingMs, cache: s.cache,
+    rowsTotal: rows.length ? rows.reduce((a, b) => a + b, 0) : undefined,
+    rowsVector: op === "multi_query" ? rows[0] : undefined, rowsBm25: op === "multi_query" ? rows[1] : undefined,
+    billedBytesQueried: s.billedBytesQueried, billedBytesWritten: s.billedBytesWritten, slow: ms >= SLOW_MS,
+  };
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined));
+}
 const TOP_N = 10;
 
 /** Run one turbopuffer call and record it in the logs and, when available, Langfuse. */
@@ -38,15 +56,18 @@ export async function tpCall<T>(op: TpufOp, namespace: string, request: Record<s
       const res = await run();
       const summary = { ...summarize(op, res), ...(opts.extra?.(res) ?? {}) };
       const ms = round(performance.now() - t0);
-      line({ tpuf: opts.label, op, namespace, ms, ...summary, request: logged });
-      observe?.({ output: summary, metadata: { op, namespace, ms } });
+      // Time outside turbopuffer's servers: network, TLS and the client library.
+      const networkMs = typeof summary.serverMs === "number" ? round(ms - summary.serverMs) : undefined;
+      line({ tpuf: opts.label, op, namespace, ms, ...(networkMs !== undefined ? { networkMs } : {}), ...summary, request: logged });
+      observe?.({ output: summary, metadata: searchable(opts.label, op, namespace, ms, networkMs, summary),
+        ...(ms >= SLOW_MS ? { level: "WARNING", statusMessage: `slow turbopuffer call: ${Math.round(ms)} ms${summary.cache ? `, cache ${summary.cache}` : ""}` } : {}) });
       return res;
     } catch (e) {
       const err = errorOf(e);
       const ms = round(performance.now() - t0);
       line({ tpuf: opts.label, op, namespace, ms, error: err, request: logged });
       // A 404 means the namespace has nothing in it yet; callers treat that as empty, so it isn't an error in Langfuse.
-      observe?.({ output: { error: err }, metadata: { op, namespace, ms },
+      observe?.({ output: { error: err }, metadata: { label: opts.label, op, namespace, ms, error: true },
         ...(err.status === 404 ? {} : { level: "ERROR", statusMessage: err.message }) });
       throw e;
     }
