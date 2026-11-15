@@ -145,17 +145,21 @@ npm run dev                  # http://localhost:3000
 
 - **Search** (`/`): search either the selected patient's notes or PubMed abstracts, trials or both
   (never notes and literature at once). Every source and retrieval mode (hybrid, vector or BM25) has a tooltip
-  saying where the data comes from or what the mode matches. The filters panel shows only the filters for the
-  sources being searched: note type and visit date for notes; status, phase, country and patient age and sex for
-  trials; year and topic for abstracts. Filters set for a source that's turned off are kept but don't
-  apply, and the page says so. Links are shareable: `/?q=...&in=notes` or `&in=pubmed,trials`.
+  saying where the data comes from or what the mode matches. Links are shareable: `/?q=...&in=notes` or
+  `&in=pubmed,trials`. The technical knobs (how hybrid fuses, approximate vs exact vectors, results per source) sit in
+  a **Search settings** popover so refining is the main way to narrow a search.
 - **Corpus line**: under the search box, the size of each corpus two ways: an exact row count from an aggregate
   `Count` query, and stored bytes from the namespace's metadata, with the monthly storage cost at $0.33 per GB.
   Hover for how each number was fetched and how long it took. The numbers load after the page has rendered
   (`/api/corpus`), are cached for 10 minutes per server, and concurrent requests share one set of calls.
-- **Facets**: counts per trial status, per topic for abstracts, or per note type, each from one
-  aggregate query with `group_by` per namespace, shown for information. The source's other active filters apply;
-  all filtering itself happens in the Filters panel.
+- **Faceted search** (the **Refine** panel beside the results): after searching, tick values to narrow, as in an
+  online store. Trials: status, phase, fits the patient, sponsor, country, start year. Abstracts: publication type,
+  topic, year, journal. Notes: note type, visit year, author. Each tick re-runs the search with the filter applied in
+  turbopuffer (a fresh top 10, not the old 10 hidden), shows as a removable chip, and lives in the URL
+  (`&f=status~Recruiting,phase~Phase 2|Phase 3`). Values in one facet combine with OR, facets with AND. Counts come
+  from aggregate `Count` queries with `group_by` (one per facet, in parallel), scoped to the query with a
+  `ContainsAnyToken` filter on `text` (documents containing the search words), and each facet's counts leave out
+  its own picks (disjunctive faceting) so the other values stay visible. A facet that fails to count says so.
 - **Cache warm-up**: selecting a patient asks turbopuffer to warm their namespace (`hint_cache_warm`). A dot on the
   selected patient in the sidebar shows cold, warming or warm, read from a tiny count query's cache temperature
   (checked once on selection and once more a few seconds later).

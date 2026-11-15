@@ -7,6 +7,8 @@ import { tpCall } from "./tpuf-log";
 import { tracedFetch } from "./traced-fetch";
 import { COMPUTED, isActive, keywordPlan, type Ranking } from "./ranking";
 import { diversifyAttr, type Diversify } from "./grouping";
+import { facetClause, facetsFor, PATIENT_FIT, refineClauses, valueLabel, type FacetCounts, type FacetKey, type FacetValue,
+  type SourceFacets } from "./facets";
 import type { Accuracy, CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
@@ -62,6 +64,8 @@ export function buildFilters(kind: Kind, f: SearchFilters, patient?: Patient | n
     if (f.visitFrom) parts.push(["visit_date", "Gte", f.visitFrom]);
     if (f.visitTo) parts.push(["visit_date", "Lte", f.visitTo]);
   }
+  // Faceted refinements (OR within a facet, AND across facets).
+  parts.push(...(refineClauses(kind, f.refine, patient ?? null) as Filter[]));
   if (!parts.length) return null;
   return parts.length === 1 ? parts[0] : ["And", parts];
 }
@@ -556,43 +560,95 @@ async function loadCorpusStats(): Promise<Record<string, CorpusStat>> {
   return { trials, pubmed };
 }
 
-const FACET_FIELD: Record<Source, Facet["field"]> = { trials: "status", pubmed: "topic", notes: "note_type" };
 
 /**
  * Counts per value of one field for each source, one aggregate query with group_by per namespace. Each source's other
  * active filters apply, so the counts match what a search would see; the faceted field's own filter is left out so
  * every value stays visible.
  */
-export async function facets(sources: Source[], f: SearchFilters, patient: Patient | null): Promise<Facet[]> {
-  const without: Record<Facet["field"], Partial<SearchFilters>> = {
-    status: { status: [] }, topic: { topic: "" }, note_type: { noteTypes: [] },
+/**
+ * Facet counts for the faceted-search panel, scoped to the query. Per source and per facet, one aggregate Count query
+ * with group_by on the facet's attribute, filtered by every refinement except the facet's own (disjunctive faceting)
+ * plus a ContainsAnyToken gate on `text`, so the counts describe documents containing the query's words. Plus one count
+ * of all matches with every refinement. Queries run in parallel; a failing facet is reported, not fatal.
+ */
+export async function facetCounts(sources: Source[], f: SearchFilters, patient: Patient | null, query: string): Promise<SourceFacets[]> {
+  const gate: Filter | null = query.trim() ? ["text", "ContainsAnyToken", query.trim()] : null;
+  const and = (xs: (Filter | null)[]): Filter | null => {
+    const ps = xs.filter(Boolean) as Filter[];
+    return ps.length === 0 ? null : ps.length === 1 ? ps[0] : ["And", ps];
   };
-  const jobs = sources.flatMap((source) => {
-    const namespace = source === "notes" ? (patient ? NS.patient(patient.id) : null)
-      : source === "trials" ? NS.trials : NS.pubmed;
-    if (!namespace) return [];
-    const field = FACET_FIELD[source];
-    const filter = buildFilters(source, { ...f, ...without[field] }, patient);
-    return [{ source, namespace, field, filter }];
+  const targets = sources.flatMap((source) => {
+    const namespace = source === "notes" ? (patient ? NS.patient(patient.id) : null) : source === "trials" ? NS.trials : NS.pubmed;
+    return namespace ? [{ source, namespace }] : [];
   });
-  return Promise.all(jobs.map(async ({ source, namespace, field, filter }) => {
-    const req: Record<string, unknown> = { aggregate_by: { n: ["Count"] }, group_by: [field], top_k: 50 };
-    if (filter) req.filters = filter;
+
+  return Promise.all(targets.map(async ({ source, namespace }) => {
+    const kind = kindOf(namespace);
+    const ns = tp().namespace(namespace);
     const t0 = performance.now();
-    try {
+    const selectedOf = (k: FacetKey) => f.refine?.[k] ?? [];
+    const without = (k: FacetKey): SearchFilters => ({ ...f, refine: { ...(f.refine ?? {}), [k]: [] } });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const run = (req: Record<string, unknown>, label: string): Promise<any> =>
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await tpCall("query", namespace, req, () => tp().namespace(namespace).query(req as any), { label: "facet-counts" });
-      const groups = ((res.aggregation_groups ?? []) as Record<string, unknown>[])
-        .map((g) => ({ value: String(g[field] ?? ""), count: Number(g.n ?? 0) }))
-        .filter((g) => g.value && g.count)
-        .sort((a, b) => b.count - a.count);
-      return { source, namespace, field, groups, ms: Math.round(performance.now() - t0) };
-    } catch (e) {
-      if ((e as { status?: number }).status === 404) return { source, namespace, field, groups: [], ms: 0 };
-      throw e;
-    }
+      tpCall("query", namespace, req, () => ns.query({ ...req, consistency: { level: "eventual" } } as any), { label });
+
+    const totalP = run({ aggregate_by: { n: ["Count"] }, ...withFilters(and([buildFilters(kind, f, patient), gate])) }, "facet-total")
+      .then((r) => Number(r.aggregations?.n ?? 0)).catch((e) => ((e as { status?: number }).status === 404 ? 0 : null));
+
+    const defs = facetsFor(kind).filter((d) => d.type !== "patient" || patient);
+    const facetsP = defs.map(async (def): Promise<FacetCounts> => {
+      const tf = performance.now();
+      const base = and([buildFilters(kind, without(def.key), patient), gate]);
+      const selected = selectedOf(def.key);
+      try {
+        let values: FacetValue[] = [];
+        if (def.type === "patient") {
+          const clause = facetClause(def, [PATIENT_FIT], patient) as Filter;
+          const r = await run({ aggregate_by: { n: ["Count"] }, ...withFilters(and([base, clause])) }, `facet-${def.key}`);
+          values = [{ value: PATIENT_FIT, label: valueLabel(def, PATIENT_FIT, patient), count: Number(r.aggregations?.n ?? 0), selected: selected.includes(PATIENT_FIT) }];
+        } else {
+          const r = await run({ aggregate_by: { n: ["Count"] }, group_by: [def.attr], top_k: 1000, ...withFilters(base) }, `facet-${def.key}`);
+          const counts = new Map<string, number>();
+          const add = (v: string, n: number) => { if (v && !def.hide?.includes(v)) counts.set(v, (counts.get(v) ?? 0) + n); };
+          for (const g of (r.aggregation_groups ?? []) as Record<string, unknown>[]) {
+            const raw = g[def.attr];
+            const n = Number(g.n ?? 0);
+            if (def.type === "buckets") {
+              const y = Number(raw);
+              const b = def.buckets!.find((x) => (x.from == null || y >= x.from) && (x.to == null || y <= x.to));
+              if (b && y > 0) add(b.value, n);
+            } else if (def.type === "visitYear") {
+              add(String(raw ?? "").slice(0, 4), n);
+            } else if (Array.isArray(raw)) {
+              // A multi-valued attribute may group by the whole array; count the document under each of its values.
+              for (const v of new Set(raw.map(String))) add(v, n);
+            } else {
+              add(String(raw ?? ""), n);
+            }
+          }
+          values = [...counts.entries()].map(([value, count]) => ({ value, label: valueLabel(def, value, patient), count, selected: selected.includes(value) }));
+          // Bucketed facets keep their natural order; the rest sort by count. Selected values always show.
+          if (def.type === "buckets") values.sort((a, b) => def.buckets!.findIndex((x) => x.value === a.value) - def.buckets!.findIndex((x) => x.value === b.value));
+          else if (def.type === "visitYear") values.sort((a, b) => b.value.localeCompare(a.value));
+          else values.sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+          for (const v of selected) if (!counts.has(v)) values.push({ value: v, label: valueLabel(def, v, patient), count: 0, selected: true });
+        }
+        return { key: def.key, label: def.label, hint: def.hint, values, ms: Math.round(performance.now() - tf) };
+      } catch (e) {
+        if ((e as { status?: number }).status === 404) return { key: def.key, label: def.label, hint: def.hint, values: [], ms: 0 };
+        return { key: def.key, label: def.label, hint: def.hint, values: [], ms: Math.round(performance.now() - tf),
+          error: String((e as Error).message).slice(0, 200) };
+      }
+    });
+
+    const [total, ...facets] = await Promise.all([totalP, ...facetsP]);
+    return { source: kind, namespace, total, scoped: !!gate, facets, ms: Math.round(performance.now() - t0) };
   }));
 }
+
+const withFilters = (f: Filter | null) => (f ? { filters: f } : {});
 
 /**
  * Cache state of a patient's namespace, read from a tiny count query (eventual consistency, so it doesn't wait on object

@@ -143,6 +143,8 @@ export interface SearchFilters {
   noteTypes?: string[];
   visitFrom?: string; // YYYY-MM-DD
   visitTo?: string;
+  /** Faceted refinements ticked after searching (see lib/facets.ts). */
+  refine?: import("./facets").Refine;
 }
 
 /** One corpus: exact rows from an aggregate Count query, stored size from namespace metadata. */

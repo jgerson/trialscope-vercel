@@ -2,21 +2,20 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
-import type { CorpusStat, Facet, Fusion, Hit, Mode, Patient, SearchFilters, SearchResponse, Source } from "@/lib/types";
+import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Filter, Info, Loader2, Search, Settings2, X } from "lucide-react";
+import type { CorpusStat, Fusion, Hit, Mode, Patient, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
 import { HitExplainer, RunOverview } from "./explain";
 import { DIVERSIFIABLE, GROUPS, groupHits, parseDiversify, type GroupKey } from "@/lib/grouping";
+import { facetDef, refineCount, refineFromParam, refineToParam, valueLabel, type FacetKey, type Refine,
+  type SourceFacets } from "@/lib/facets";
 import { BOOSTS, DEFAULT_MIDPOINT, DEFAULT_SPAN, isActive, rankingFromParam, rankingToParam, STRENGTH_LABEL,
   STRENGTH_WEIGHT, type Ranking, type Strength } from "@/lib/ranking";
 import { cx, highlight, Segmented, SourceTag, Tip } from "./ui";
 
 const EXAMPLES = ["trastuzumab cardiotoxicity monitoring", "EGFR exon 19 resistance after osimertinib",
   "pulsed field ablation for atrial fibrillation", "NCT03418961"];
-const STATUSES = ["Recruiting", "Not yet recruiting", "Active not recruiting", "Completed", "Enrolling by invitation", "Terminated"];
-const PHASES = ["Early phase 1", "Phase 1", "Phase 2", "Phase 3", "Phase 4"];
-const NOTE_TYPES = ["Visit note", "Result", "Phone call", "Treatment plan", "Other"];
 const LITERATURE: Source[] = ["pubmed", "trials"];
 const LIT_LABEL: Record<Source, string> = { notes: "Patient notes", pubmed: "Abstracts", trials: "Trials" };
 const MODES: { value: Mode; label: string; hint: string }[] = [
@@ -74,13 +73,17 @@ export function SearchView() {
   // Optional boosts and recency (all off by default), kept in the URL as ?rk=… so a link reproduces the ranking.
   const [ranking, setRanking] = useState<Ranking>(() => rankingFromParam(params.get("rk")));
   const rankingKey = rankingToParam(ranking);
-  const [filters, setFilters] = useState<SearchFilters>({});
-  const [topK, setTopK] = useState(10);
+  // Faceted refinements (?f=status~Recruiting,phase~Phase 2|Phase 3), applied as turbopuffer filters.
+  const [refine, setRefine] = useState<Refine>(() => refineFromParam(params.get("f")));
+  const refineKey = refineToParam(refine);
+  const [topK, setTopK] = useState(() => Math.min(30, Math.max(5, Number(params.get("k")) || 10)));
+  const [facetsOpen, setFacetsOpen] = useState(false); // below lg the panel opens from a Refine button
   const [data, setData] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [facetList, setFacetList] = useState<Facet[]>([]);
+  const [facetData, setFacetData] = useState<SourceFacets[]>([]);
+  const [facetsLoading, setFacetsLoading] = useState(false);
   const q = params.get("q") ?? "";
   const sources: Source[] = area === "notes" ? ["notes"] : lit;
   const sourcesKey = sources.join(",");
@@ -94,7 +97,7 @@ export function SearchView() {
         body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, fusion, ranking: rankingFromParam(rankingKey),
           diversify: divKey ? { by: divKey.split("-")[0], per: Number(divKey.split("-")[1]) } : null, candidates,
           exact: mode !== "bm25" && vectorMethod === "exact",
-          filters, topK, patientId: patient?.id }),
+          filters: { refine: refineFromParam(refineKey) }, topK, patientId: patient?.id }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Search failed.");
@@ -104,21 +107,38 @@ export function SearchView() {
     } finally {
       setLoading(false);
     }
-  }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, vectorMethod, filters, topK, patient?.id]);
+  }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, vectorMethod, refineKey, topK, patient?.id]);
 
   // Re-run whenever the query in the URL or any control changes.
   useEffect(() => { setInput(q); run(q); }, [q, run]);
 
-  // Facet counts for the sources being searched, with the other active filters applied.
+  // Facet counts for the sources being searched, scoped to the query, with every other refinement applied.
   useEffect(() => {
-    if (area === "notes" && !patient) { setFacetList([]); return; }
+    if (!q.trim() || (area === "notes" && !patient)) { setFacetData([]); return; }
     const ctl = new AbortController();
+    setFacetsLoading(true);
     fetch("/api/facets", {
       method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
-      body: JSON.stringify({ sources: sourcesKey.split(","), filters, patientId: patient?.id }),
-    }).then((r) => r.json()).then((j) => setFacetList(j.facets ?? [])).catch(() => {});
+      body: JSON.stringify({ q, sources: sourcesKey.split(","), filters: { refine: refineFromParam(refineKey) }, patientId: patient?.id }),
+    }).then((r) => r.json()).then((j) => { setFacetData(j.facets ?? []); setFacetsLoading(false); })
+      .catch(() => setFacetsLoading(false));
     return () => ctl.abort();
-  }, [area, sourcesKey, filters, patient?.id]);
+  }, [q, area, sourcesKey, refineKey, patient?.id]);
+
+  // Keep refinements in the URL so a refined search can be shared; replace() so each tick isn't a history entry.
+  useEffect(() => {
+    if (!q) return;
+    const sp = new URLSearchParams(window.location.search);
+    if (refineKey) sp.set("f", refineKey); else sp.delete("f");
+    if (topK !== 10) sp.set("k", String(topK)); else sp.delete("k");
+    const next = `/?${sp.toString()}`;
+    if (next !== `${window.location.pathname}${window.location.search}`) router.replace(next, { scroll: false });
+  }, [refineKey, topK, q, router]);
+
+  const toggleRefine = (key: FacetKey, value: string) => setRefine((r) => {
+    const cur = r[key] ?? [];
+    return { ...r, [key]: cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value] };
+  });
 
   const submit = (text: string) => {
     const sp = new URLSearchParams({ q: text.trim() });
@@ -131,6 +151,8 @@ export function SearchView() {
     if (divKey) sp.set("div", divKey);
     if (mode !== "bm25" && vectorMethod === "exact") sp.set("vec", "exact");
     if (groupBy) sp.set("group", groupBy);
+    if (refineKey) sp.set("f", refineKey);
+    if (topK !== 10) sp.set("k", String(topK));
     router.replace(`/?${sp.toString()}`, { scroll: false });
     // The search re-runs when the query in the URL changes. Searching the same words again (say, after switching from
     // hybrid to vector) leaves the query unchanged, so run it directly.
@@ -143,10 +165,7 @@ export function SearchView() {
   });
 
   const hit = data?.hits.find((h) => h.key === selected) ?? null;
-  const groups = filterGroups(filters);
-  const activeFilters = sources.reduce((n, s) => n + (groups[s] ?? 0), 0);
-  const idle = Object.entries(groups).filter(([s, n]) => n && !sources.includes(s as Source)).map(([s]) => LIT_LABEL[s as Source]);
-  const idleNames = idle.map((n) => n.toLowerCase());
+  const activeRefinements = refineCount(refine, sources);
 
   const notesLabel = patient ? `${patient.name.split(" ")[0]}'s notes` : "Patient notes";
   const corpusTotal = ["pubmed", "trials"].reduce((n, k) => n + (stats[k]?.bytes ?? 0), 0);
@@ -201,39 +220,11 @@ export function SearchView() {
             </div>
           )}
           <Segmented label="Retrieval" value={mode} options={MODES} onChange={setMode} />
-          {mode === "hybrid" && (
-            <div className="inline-flex items-center gap-2">
-              <span className="text-[12.5px] text-slate">Fused by</span>
-              <Segmented label="Fusion" value={fusion} options={FUSIONS} onChange={setFusion} />
-              {fusion === "rerank" && (
-                <Tip text="Candidates per list sent to the model. More can surface better matches, but each one is a model read (latency and cost).">
-                  <select aria-label="Rerank candidates" value={candidates} onChange={(e) => setCandidates(Number(e.target.value))}
-                    className="rounded-lg border border-line bg-surface px-2 py-1.5 text-[13px] text-ink-2">
-                    {CANDIDATES.map((n) => <option key={n} value={n}>{n} candidates</option>)}
-                  </select>
-                </Tip>
-              )}
-            </div>
-          )}
-          {mode !== "bm25" && (
-            <div className="inline-flex items-center gap-2">
-              <span className="text-[12.5px] text-slate">Vector</span>
-              <Segmented label="Vector search" value={vectorMethod} options={VECTOR_METHODS} onChange={setVectorMethod} />
-            </div>
-          )}
+          <SettingsButton mode={mode} fusion={fusion} setFusion={setFusion} candidates={candidates} setCandidates={setCandidates}
+            vectorMethod={vectorMethod} setVectorMethod={setVectorMethod} topK={topK} setTopK={setTopK} />
           <RankingButton ranking={ranking} setRanking={setRanking} mode={mode} sources={sources} patient={patient}
             rerank={mode === "hybrid" && fusion === "rerank"} />
-          <FiltersButton filters={filters} setFilters={setFilters} topK={topK} setTopK={setTopK} active={activeFilters}
-            sources={sources} patient={patient} />
         </div>
-
-        {idleNames.length > 0 && (
-          <p className="mt-2 text-[12.5px] text-slate">
-            Filters for {idleNames.join(" and ")} are set but don’t apply, because {idleNames.length > 1 ? "those sources are" : "that source is"} off.
-          </p>
-        )}
-
-        <FacetRow facets={facetList} />
 
         {area === "notes" && !patient && (
           <p className="mt-4 rounded-xl border border-line bg-surface px-4 py-3 text-[13.5px] text-slate">Pick a patient on the left to search their notes.</p>
@@ -257,17 +248,27 @@ export function SearchView() {
       {error && <p className="mt-8 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</p>}
 
       {q && (
-        <div className="mt-8 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
+        <div className="mt-8 grid items-start gap-6 lg:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[230px_minmax(0,1fr)_400px]">
+          <div className={cx(!facetsOpen && "max-lg:hidden")}>
+            <FacetPanel data={facetData} loading={facetsLoading} refine={refine} toggle={toggleRefine} patient={patient}
+              onClose={() => setFacetsOpen(false)} />
+          </div>
           <section aria-label="Results" aria-busy={loading}>
             <div className="flex items-baseline gap-3">
               <h2 className="font-display text-[32px] leading-none tracking-tight">{data ? `${data.hits.length} results` : "Searching"}</h2>
               {data && <span className="text-[13.5px] text-slate">
                 {MODES.find((m) => m.value === data.mode)?.label}{data.mode === "hybrid" ? ` (${data.fusion === "rerank" ? "model reranked" : `fused ${data.fusion === "server" ? "on turbopuffer" : "in app"}`})` : ""} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
               </span>}
+              <button type="button" onClick={() => setFacetsOpen(!facetsOpen)} aria-expanded={facetsOpen}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-2 lg:hidden">
+                <Filter size={14} />Refine{activeRefinements ? ` (${activeRefinements})` : ""}
+              </button>
             </div>
+            <ActiveRefinements refine={refine} setRefine={setRefine} sources={sources} patient={patient}
+              total={facetData.length === 1 ? facetData[0].total : null} />
             <div className={cx("mt-4 space-y-2.5 transition-opacity", loading && data && "opacity-50")}>
               {!data && loading && Array.from({ length: 4 }, (_, i) => <SkeletonCard key={i} />)}
-              {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try fewer filters or different sources.</p>}
+              {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try removing a refinement or picking different sources.</p>}
               {data && data.hits.length > 0 && (
                 <GroupControls groupBy={groupBy} setGroupBy={setGroupBy} diversify={diversify} setDiversify={setDiversify}
                   sources={sources} />
@@ -316,15 +317,6 @@ function sourceHint(s: Source, stats: Record<string, CorpusStat>) {
   }[s];
 }
 
-/** How many filters are set per source. */
-function filterGroups(f: SearchFilters): Record<Source, number> {
-  const lit = [(f.yearFrom ?? 2015) > 2015, f.topic].filter(Boolean).length;
-  return {
-    trials: [f.status?.length, f.phases?.length, f.country, f.matchPatient].filter(Boolean).length,
-    pubmed: lit,
-    notes: [f.noteTypes?.length, f.visitFrom, f.visitTo].filter(Boolean).length,
-  };
-}
 
 /** One quiet line: what's being searched and how big it is. Hover for how each number was fetched. */
 function CorpusLine({ area, patient, stats, total }: {
@@ -364,27 +356,6 @@ function CorpusLine({ area, patient, stats, total }: {
   );
 }
 
-const FACET_LABEL: Record<Facet["source"], string> = { trials: "Trials by status", pubmed: "Abstracts by topic", notes: "Notes by type" };
-
-/** Counts per value from one grouped aggregate query per source, for information. Filtering happens in the Filters panel. */
-function FacetRow({ facets }: { facets: Facet[] }) {
-  const shown = facets.filter((f) => f.groups.length);
-  if (!shown.length) return null;
-  return (
-    <div className="mt-3 flex flex-col gap-1 text-[12.5px] text-slate">
-      {shown.map((f) => (
-        <p key={f.source}>
-          <Tip align="left" text={`One aggregate Count query with group_by ["${f.field}"] on ${f.namespace}, ${f.ms} ms. Your other active filters apply.`}>
-            <span className="mr-1.5 font-medium text-ink-2 underline decoration-dotted underline-offset-2">{FACET_LABEL[f.source]}</span>
-          </Tip>
-          {f.groups.slice(0, 8).map((g, i) => (
-            <span key={g.value}>{i ? " · " : ""}{g.value[0].toUpperCase() + g.value.slice(1)} <span className="tabular-nums">{g.count.toLocaleString()}</span></span>
-          ))}
-        </p>
-      ))}
-    </div>
-  );
-}
 
 function queryWords(q: string) {
   return [...new Set(q.toLowerCase().match(/[a-z0-9-]{4,}/g) ?? [])].filter((w) =>
@@ -579,12 +550,16 @@ function RankingButton({ ranking, setRanking, mode, sources, patient, rerank }: 
   );
 }
 
-function FiltersButton({ filters, setFilters, topK, setTopK, active, sources, patient }: {
-  filters: SearchFilters; setFilters: (f: SearchFilters) => void; topK: number; setTopK: (n: number) => void;
-  active: number; sources: Source[]; patient: Patient | null;
+
+/**
+ * Search settings: the technical knobs (how hybrid fuses, approximate vs exact vectors, results per source), kept out of
+ * the main row so faceted refinement is the primary way to narrow a search.
+ */
+function SettingsButton({ mode, fusion, setFusion, candidates, setCandidates, vectorMethod, setVectorMethod, topK, setTopK }: {
+  mode: Mode; fusion: Fusion; setFusion: (f: Fusion) => void; candidates: number; setCandidates: (n: number) => void;
+  vectorMethod: "ann" | "exact"; setVectorMethod: (m: "ann" | "exact") => void; topK: number; setTopK: (n: number) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(filters);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -593,83 +568,145 @@ function FiltersButton({ filters, setFilters, topK, setTopK, active, sources, pa
     document.addEventListener("mousedown", close); document.addEventListener("keydown", esc);
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc); };
   }, [open]);
-  const toggle = (key: "status" | "phases" | "noteTypes", v: string) => {
-    const cur = draft[key] ?? [];
-    setDraft({ ...draft, [key]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v] });
-  };
-  const chip = (on: boolean) => cx("rounded-full border px-3 py-1 text-[12.5px]",
-    on ? "border-ink bg-ink text-white" : "border-line text-ink-2 hover:border-line-2");
-  const notes = sources.includes("notes");
-  const trials = sources.includes("trials");
-  const lit = sources.includes("pubmed");
-  const litName = "Abstracts";
-  // Only the filters for the sources being searched are cleared; the rest are kept for when those sources come back.
-  const cleared: SearchFilters = {
-    ...draft,
-    ...(notes ? { noteTypes: [], visitFrom: "", visitTo: "" } : {}),
-    ...(trials ? { status: [], phases: [], country: "", matchPatient: false } : {}),
-    ...(lit ? { yearFrom: 2015, topic: "" } : {}),
-  };
-  const date = "mt-1.5 block w-full rounded-lg border border-line px-3 py-1.5 text-[13.5px] text-ink focus:border-accent focus:outline-none";
-
+  const changed = (mode === "hybrid" && fusion !== "server") || (mode !== "bm25" && vectorMethod === "exact") || topK !== 10;
+  const summary = [
+    mode === "hybrid" ? { server: "turbopuffer RRF", app: "in-app RRF", rerank: "model rerank" }[fusion] : null,
+    mode !== "bm25" && vectorMethod === "exact" ? "exact vectors" : null,
+    topK !== 10 ? `${topK} per source` : null,
+  ].filter(Boolean).join(" · ");
   return (
     <div ref={ref} className="relative">
-      <button type="button" onClick={() => { setDraft(filters); setOpen(!open); }} aria-expanded={open}
+      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}
         className={cx("inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[13px] font-medium",
-          active ? "border-accent bg-accent-soft text-accent-strong" : "border-line bg-surface text-ink-2 hover:border-line-2")}>
-        <SlidersHorizontal size={15} />Filters{active ? ` (${active})` : ""}
+          changed ? "border-accent bg-accent-soft text-accent-strong" : "border-line bg-surface text-ink-2 hover:border-line-2")}>
+        <Settings2 size={15} />Search settings{changed && summary ? `: ${summary}` : ""}
       </button>
       {open && (
-        <div className="absolute top-full left-0 z-30 mt-2 w-[min(92vw,420px)] animate-fade-in rounded-2xl border border-line bg-surface p-5 shadow-pop">
-          {notes && (<>
-            <h3 className="text-[13px] font-semibold text-ink">{patient ? `${patient.name}'s notes` : "Patient notes"}</h3>
-            <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Note type</p>
-            <div className="flex flex-wrap gap-1.5">{NOTE_TYPES.map((s) => <button key={s} className={chip(!!draft.noteTypes?.includes(s))} onClick={() => toggle("noteTypes", s)}>{s}</button>)}</div>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <label className="block text-[12.5px] text-slate">Visit from
-                <input type="date" value={draft.visitFrom ?? ""} onChange={(e) => setDraft({ ...draft, visitFrom: e.target.value })} className={date} />
+        <div className="absolute top-full left-0 z-30 mt-2 w-[min(92vw,460px)] animate-fade-in space-y-4 rounded-2xl border border-line bg-surface p-5 shadow-pop">
+          <div className={cx(mode !== "hybrid" && "opacity-55")}>
+            <p className="mb-1.5 text-[13px] font-semibold text-ink">Fused by {mode !== "hybrid" && <span className="font-normal text-slate">(hybrid only)</span>}</p>
+            <Segmented label="Fusion" value={fusion} options={FUSIONS} onChange={setFusion} />
+            {fusion === "rerank" && mode === "hybrid" && (
+              <label className="mt-2 flex items-center gap-2 text-[12.5px] text-slate">
+                Candidates per list sent to the model
+                <select value={candidates} onChange={(e) => setCandidates(Number(e.target.value))}
+                  className="rounded-md border border-line bg-surface px-2 py-1 text-[12.5px] text-ink">
+                  {CANDIDATES.map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
               </label>
-              <label className="block text-[12.5px] text-slate">Visit to
-                <input type="date" value={draft.visitTo ?? ""} onChange={(e) => setDraft({ ...draft, visitTo: e.target.value })} className={date} />
-              </label>
-            </div>
-          </>)}
-          {trials && (<>
-            <h3 className="text-[13px] font-semibold text-ink">Clinical trials</h3>
-            <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Status</p>
-            <div className="flex flex-wrap gap-1.5">{STATUSES.map((s) => <button key={s} className={chip(!!draft.status?.includes(s))} onClick={() => toggle("status", s)}>{s}</button>)}</div>
-            <p className="mt-3 mb-1.5 text-[12.5px] text-slate">Phase</p>
-            <div className="flex flex-wrap gap-1.5">{PHASES.map((s) => <button key={s} className={chip(!!draft.phases?.includes(s))} onClick={() => toggle("phases", s)}>{s}</button>)}</div>
-            <label className="mt-3 block text-[12.5px] text-slate">Country
-              <input value={draft.country ?? ""} onChange={(e) => setDraft({ ...draft, country: e.target.value })} placeholder="United States" className={date} />
-            </label>
-            <label className={cx("mt-3 flex items-center gap-2 text-[13px] text-ink-2", !patient && "opacity-50")}>
-              <input type="checkbox" disabled={!patient} checked={!!draft.matchPatient} onChange={(e) => setDraft({ ...draft, matchPatient: e.target.checked })}
-                className="size-4 accent-[var(--color-accent)]" />
-              {patient ? `Match ${patient.name.split(" ")[0]}'s age and sex (${patient.age}, ${patient.sex.toLowerCase()})` : "Match the selected patient's age and sex"}
-            </label>
-          </>)}
-          {lit && (<>
-            <h3 className={cx("text-[13px] font-semibold text-ink", trials && "mt-5")}>{litName}</h3>
-            <label className="mt-2 block text-[12.5px] text-slate">Published from <b className="text-ink tabular-nums">{draft.yearFrom ?? 2015}</b>
-              <input type="range" min={2015} max={2026} value={draft.yearFrom ?? 2015} onChange={(e) => setDraft({ ...draft, yearFrom: Number(e.target.value) })}
-                className="mt-1 block w-full accent-[var(--color-accent)]" />
-            </label>
-            <div className="mt-2 flex gap-1.5">
-              {(["", "oncology", "cardiology"] as const).map((t) => (
-                <button key={t || "any"} className={chip((draft.topic ?? "") === t)} onClick={() => setDraft({ ...draft, topic: t })}>{t ? t[0].toUpperCase() + t.slice(1) : "Any topic"}</button>
-              ))}
-            </div>
-          </>)}
-          <label className="mt-5 block text-[12.5px] text-slate">Results per source <b className="text-ink tabular-nums">{topK}</b>
-            <input type="range" min={5} max={30} value={topK} onChange={(e) => setTopK(Number(e.target.value))} className="mt-1 block w-full accent-[var(--color-accent)]" />
-          </label>
-          <div className="mt-5 flex justify-between">
-            <button onClick={() => { setDraft(cleared); setFilters(cleared); setOpen(false); }} className="text-[13px] font-medium text-slate hover:text-ink">Clear these filters</button>
-            <button onClick={() => { setFilters(draft); setOpen(false); }} className="rounded-lg bg-ink px-4 py-2 text-[13px] font-semibold text-white hover:bg-ink-2">Apply filters</button>
+            )}
           </div>
+          <div className={cx(mode === "bm25" && "opacity-55")}>
+            <p className="mb-1.5 text-[13px] font-semibold text-ink">Vector search {mode === "bm25" && <span className="font-normal text-slate">(not used by BM25)</span>}</p>
+            <Segmented label="Vector search" value={vectorMethod} options={VECTOR_METHODS} onChange={setVectorMethod} />
+          </div>
+          <label className="block text-[13px] font-semibold text-ink">Results per source <b className="tabular-nums">{topK}</b>
+            <input type="range" min={5} max={30} value={topK} onChange={(e) => setTopK(Number(e.target.value))}
+              className="mt-1 block w-full accent-[var(--color-accent)]" />
+          </label>
         </div>
       )}
+    </div>
+  );
+}
+
+const SOURCE_TITLE: Record<Source, string> = { trials: "Clinical trials", pubmed: "PubMed", notes: "Patient notes" };
+const FACET_PREVIEW = 6;
+
+/**
+ * The faceted-search panel: per source, each facet's values with counts scoped to the query. Ticking a value re-runs the
+ * search with that filter applied in turbopuffer, and every count refreshes (a facet's own counts ignore its own picks).
+ */
+function FacetPanel({ data, loading, refine, toggle, patient, onClose }: {
+  data: SourceFacets[]; loading: boolean; refine: Refine; toggle: (k: FacetKey, v: string) => void; patient: Patient | null;
+  onClose: () => void;
+}) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  if (!data.length && loading) {
+    return <div className="space-y-3">{Array.from({ length: 3 }, (_, i) => <div key={i} className="h-24 animate-pulse rounded-xl bg-paper" />)}</div>;
+  }
+  if (!data.length) return null;
+  return (
+    <nav aria-label="Refine results" className={cx("space-y-5 transition-opacity", loading && "opacity-60")}>
+      <div className="flex items-center justify-between lg:hidden">
+        <span className="text-[14px] font-semibold text-ink">Refine</span>
+        <button type="button" onClick={onClose} aria-label="Close refinements" className="rounded-lg bg-paper p-1.5 text-slate"><X size={16} /></button>
+      </div>
+      {data.map((src) => (
+        <section key={src.namespace} aria-label={SOURCE_TITLE[src.source]}>
+          <Tip align="left" text={`Counts from aggregate Count queries with group_by on ${src.namespace}, ${src.scoped
+            ? "limited to documents containing your search words" : "over the whole source"}. ${src.ms} ms for all facets.`}>
+            <h3 className="text-[12px] font-semibold uppercase tracking-wide text-slate">
+              {SOURCE_TITLE[src.source]}{src.total != null && <span className="ml-1.5 font-normal normal-case tracking-normal">{src.total.toLocaleString()} matches</span>}
+            </h3>
+          </Tip>
+          <div className="mt-2 space-y-4">
+            {src.facets.filter((f) => f.values.length || f.error).map((f) => {
+              const open = expanded[f.key];
+              const shown = open ? f.values : [...f.values.slice(0, FACET_PREVIEW), ...f.values.slice(FACET_PREVIEW).filter((v) => v.selected)];
+              const more = f.values.length - shown.length;
+              return (
+                <fieldset key={f.key}>
+                  <Tip align="left" text={f.hint}><legend className="mb-1 text-[13px] font-semibold text-ink">{f.label}</legend></Tip>
+                  {f.error && <p className="text-[12px] text-amber-800">Couldn&apos;t count this facet.</p>}
+                  <ul className="space-y-0.5">
+                    {shown.map((v) => (
+                      <li key={v.value}>
+                        <label className={cx("flex cursor-pointer items-baseline gap-2 rounded-md px-1 py-0.5 text-[13px] hover:bg-paper",
+                          !v.count && !v.selected && "opacity-45")}>
+                          <input type="checkbox" checked={v.selected} disabled={!v.count && !v.selected}
+                            onChange={() => toggle(f.key, v.value)} className="translate-y-[1px] accent-[var(--color-accent)]" />
+                          <span className={cx("min-w-0 flex-1 truncate", v.selected ? "font-medium text-ink" : "text-ink-2")} title={v.label}>
+                            {f.key === "patientFit" ? valueLabel(facetDef(f.key)!, v.value, patient) : v.label}
+                          </span>
+                          <span className="tabular-nums text-[12px] text-slate">{v.count.toLocaleString()}</span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                  {(more > 0 || open) && f.values.length > FACET_PREVIEW && (
+                    <button type="button" onClick={() => setExpanded((e) => ({ ...e, [f.key]: !open }))}
+                      className="mt-0.5 px-1 text-[12.5px] text-accent hover:underline">
+                      {open ? "Show fewer" : `Show ${more} more`}
+                    </button>
+                  )}
+                </fieldset>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+      <p className="text-[11.5px] leading-relaxed text-slate">
+        Counts cover documents containing your search words. Within a facet, picks combine with OR; across facets, with AND.
+      </p>
+    </nav>
+  );
+}
+
+/** The active refinements as removable chips, above the results. */
+function ActiveRefinements({ refine, setRefine, sources, patient, total }: {
+  refine: Refine; setRefine: (r: Refine) => void; sources: Source[]; patient: Patient | null; total: number | null;
+}) {
+  const chips = Object.entries(refine).flatMap(([k, vals]) => {
+    const def = facetDef(k);
+    if (!def || !sources.includes(def.kind)) return [];
+    return (vals ?? []).map((v) => ({ key: def.key, value: v, text: `${def.label}: ${valueLabel(def, v, patient)}` }));
+  });
+  if (!chips.length) return null;
+  const remove = (key: FacetKey, value: string) => setRefine({ ...refine, [key]: (refine[key] ?? []).filter((x) => x !== value) });
+  const clearAll = () => setRefine(Object.fromEntries(Object.entries(refine).filter(([k]) => !sources.includes(facetDef(k)!.kind))));
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+      {chips.map((c) => (
+        <button key={`${c.key}:${c.value}`} type="button" onClick={() => remove(c.key, c.value)}
+          className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent-soft px-2.5 py-1 text-[12.5px] text-ink-2 hover:border-accent">
+          {c.text}<X size={12} aria-label="Remove" />
+        </button>
+      ))}
+      <button type="button" onClick={clearAll} className="ml-1 text-[12.5px] text-slate underline decoration-dotted underline-offset-2 hover:text-ink">
+        Clear all
+      </button>
+      {total != null && <span className="ml-auto text-[12.5px] text-slate">{total.toLocaleString()} matching documents</span>}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { getPatient } from "@/lib/patients";
 import { buildFilters, search } from "@/lib/tpuf";
 import { describeRanking, isActive, parseRanking } from "@/lib/ranking";
 import { parseDiversify } from "@/lib/grouping";
+import { cleanRefine } from "@/lib/facets";
 import type { Fusion, Mode, SearchFilters, Source } from "@/lib/types";
 import { requireUserId } from "@/lib/session";
 
@@ -31,7 +32,8 @@ export async function POST(req: Request) {
   const boosts = describeRanking(ranking);
   const topK = Math.min(30, Math.max(5, Number(body.topK ?? 10)));
   const patient = await getPatient(body.patientId);
-  const f = body.filters ?? {};
+  // Faceted refinements are validated against lib/facets.ts before they reach a filter.
+  const f: SearchFilters = { ...(body.filters ?? {}), refine: cleanRefine(body.filters?.refine) };
 
   const sources = parseSources(body.sources, body.scope);
 
