@@ -31,6 +31,10 @@ const FUSIONS: { value: Fusion; label: string; hint: string }[] = [
   { value: "rerank", label: "Model rerank", hint: "turbopuffer pools both lists' candidates and a relevance model reads each one against your query (rerank_by). Slower and paid per token, better at nuance like 'after osimertinib'. Each result shows where RRF would have put it." },
 ];
 const CANDIDATES = [20, 30, 40];
+const VECTOR_METHODS: { value: "ann" | "exact"; label: string; hint: string }[] = [
+  { value: "ann", label: "Approximate", hint: "ANN: turbopuffer searches its vector index and skips most documents. Fast; can occasionally miss a true nearest neighbor (turbopuffer targets 90–95% recall@10)." },
+  { value: "exact", label: "Exact", hint: "kNN: compares the query with every document that passes the filters. Always finds the true nearest neighbors; slower on large sources. Use it on small or tightly filtered sets, or to check ANN." },
+];
 
 type Area = "notes" | "literature";
 
@@ -66,6 +70,7 @@ export function SearchView() {
     return parseDiversify({ by, per });
   });
   const divKey = diversify ? `${diversify.by}-${diversify.per}` : "";
+  const [vectorMethod, setVectorMethod] = useState<"ann" | "exact">(params.get("vec") === "exact" ? "exact" : "ann");
   // Optional boosts and recency (all off by default), kept in the URL as ?rk=… so a link reproduces the ranking.
   const [ranking, setRanking] = useState<Ranking>(() => rankingFromParam(params.get("rk")));
   const rankingKey = rankingToParam(ranking);
@@ -88,6 +93,7 @@ export function SearchView() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, fusion, ranking: rankingFromParam(rankingKey),
           diversify: divKey ? { by: divKey.split("-")[0], per: Number(divKey.split("-")[1]) } : null, candidates,
+          exact: mode !== "bm25" && vectorMethod === "exact",
           filters, topK, patientId: patient?.id }),
       });
       const json = await res.json();
@@ -98,7 +104,7 @@ export function SearchView() {
     } finally {
       setLoading(false);
     }
-  }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, filters, topK, patient?.id]);
+  }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, vectorMethod, filters, topK, patient?.id]);
 
   // Re-run whenever the query in the URL or any control changes.
   useEffect(() => { setInput(q); run(q); }, [q, run]);
@@ -123,6 +129,7 @@ export function SearchView() {
     if (rankingKey) sp.set("rk", rankingKey);
     if (mode === "hybrid" && fusion === "rerank") { sp.set("fusion", "rerank"); if (candidates !== 30) sp.set("cand", String(candidates)); }
     if (divKey) sp.set("div", divKey);
+    if (mode !== "bm25" && vectorMethod === "exact") sp.set("vec", "exact");
     if (groupBy) sp.set("group", groupBy);
     router.replace(`/?${sp.toString()}`, { scroll: false });
     // The search re-runs when the query in the URL changes. Searching the same words again (say, after switching from
@@ -206,6 +213,12 @@ export function SearchView() {
                   </select>
                 </Tip>
               )}
+            </div>
+          )}
+          {mode !== "bm25" && (
+            <div className="inline-flex items-center gap-2">
+              <span className="text-[12.5px] text-slate">Vector</span>
+              <Segmented label="Vector search" value={vectorMethod} options={VECTOR_METHODS} onChange={setVectorMethod} />
             </div>
           )}
           <RankingButton ranking={ranking} setRanking={setRanking} mode={mode} sources={sources} patient={patient}

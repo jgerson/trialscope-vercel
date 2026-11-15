@@ -7,7 +7,7 @@ import { tpCall } from "./tpuf-log";
 import { tracedFetch } from "./traced-fetch";
 import { COMPUTED, isActive, keywordPlan, type Ranking } from "./ranking";
 import { diversifyAttr, type Diversify } from "./grouping";
-import type { CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
+import type { Accuracy, CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
@@ -156,7 +156,7 @@ function compareFusion(server: Row[], app: [string, Signals][], verifyMs: number
 
 async function searchNamespace(namespace: string, query: string, mode: Mode, filter: Filter | null, topK: number,
   terms: string[], fusion: Fusion, verify: boolean, ranking: Ranking | null, patient: Patient | null,
-  extra: { diversify: Diversify | null; candidates: number }): Promise<NsResult> {
+  extra: { diversify: Diversify | null; candidates: number; exact: boolean }): Promise<NsResult> {
   const kind = kindOf(namespace);
   const reranking = mode === "hybrid" && fusion === "rerank";
   // With model reranking each subquery returns `candidates` rows (not topK), with `text` included for the model to read.
@@ -167,7 +167,12 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
     : { top_k: perList };
   const base: Record<string, unknown> = { ...size, include_attributes: reranking ? [...DISPLAY[kind], "text"] : DISPLAY[kind] };
   if (filter) base.filters = filter;
-  const vec = { ...base, rank_by: ["text", "ANN", ["Embed", query]] };
+  // Vector subquery: approximate (the ANN index) by default; exact kNN compares the query with every document that
+  // passes the filters. If turbopuffer rejects kNN here (400), the search falls back to ANN and says so.
+  let vecMethod: "ann" | "knn" = extra.exact && mode !== "bm25" ? "knn" : "ann";
+  let vecError: string | null = null;
+  const vecFor = (m: "ann" | "knn") => ({ ...base, rank_by: ["text", m === "knn" ? "kNN" : "ANN", ["Embed", query]] });
+  let vec = vecFor(vecMethod);
   // The keyword subquery: plain BM25, or BM25 plus the requested boosts (see lib/ranking.ts). The reranker rescores
   // everything, so boosts are skipped (and listed as skipped) in that mode.
   const plan = keywordPlan(kind, query, mode === "vector" || reranking ? null : ranking, patient, config.bm25Midpoint);
@@ -273,6 +278,12 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
         break;
       } catch (e: unknown) {
         const status = (e as { status?: number }).status;
+        if (status === 400 && vecMethod === "knn") {
+          vecError = `Exact (kNN) search was rejected: ${String((e as Error).message).slice(0, 200)}. Ran approximate (ANN) instead.`;
+          vecMethod = "ann";
+          vec = vecFor("ann");
+          continue;
+        }
         if (status === 400 && level < 2) {
           rankingError = `turbopuffer rejected the ${level === 0 ? "per-result breakdown" : "boost expression"}: ${String((e as Error).message).slice(0, 240)}`;
           level = (level + 1) as 1 | 2;
@@ -347,6 +358,7 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
         retrievalServerMs: compareServerMs, error: rerankError,
       } : null,
       diversify: divAttr ? { attribute: divAttr, per: extra.diversify!.per } : null,
+      vectorSearch: mode === "bm25" ? null : { method: vecMethod, error: vecError },
       ranking: plan.parts.length || plan.skipped.length || rankingError ? {
         applied: level === 2 ? [] : plan.parts.map((p) => `${p.label} +${p.weight}`),
         skipped: plan.skipped.map((x) => `${x.label}: ${x.why}`),
@@ -360,14 +372,14 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
 
 export async function search(targets: { namespace: string; filter: Filter | null }[], query: string, mode: Mode,
   topK: number, opts: { fusion?: Fusion; verify?: boolean; ranking?: Ranking | null; patient?: Patient | null;
-    diversify?: Diversify | null; candidates?: number } = {}): Promise<SearchResponse> {
+    diversify?: Diversify | null; candidates?: number; exact?: boolean } = {}): Promise<SearchResponse> {
   const fusion: Fusion = opts.fusion ?? "server";
   const ranking = isActive(opts.ranking) ? opts.ranking! : null;
   const verify = opts.verify ?? config.fusionVerify;
   const terms = queryTerms(query);
   const t0 = performance.now();
   const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms, fusion, verify, ranking,
-    opts.patient ?? null, { diversify: opts.diversify ?? null, candidates: opts.candidates ?? config.rerankCandidates })));
+    opts.patient ?? null, { diversify: opts.diversify ?? null, candidates: opts.candidates ?? config.rerankCandidates, exact: !!opts.exact })));
   const wallMs = performance.now() - t0;
 
   // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order). This step
@@ -376,8 +388,49 @@ export async function search(targets: { namespace: string; filter: Filter | null
   merged.sort((a, b) => b.rrf - a.rrf);
   const hits: Hit[] = merged.map((h, i) => ({ ...h, overall: i + 1 }));
 
-  return { query, mode, fusion, ranking, diversify: opts.diversify ?? null, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
+  return { query, mode, fusion, ranking, diversify: opts.diversify ?? null, vectorExact: !!opts.exact, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
 }
+
+// ------------------------------------------------------------------ ANN accuracy
+
+/**
+ * How accurate was the approximate vector search for this query? Three independent checks, each allowed to fail alone:
+ * - turbopuffer's recall endpoint for this exact rank_by + filters (num 1): it runs ANN and an exhaustive search itself;
+ * - the recall endpoint on 20 searches with random vectors sampled from the namespace (a namespace-level figure);
+ * - the same vector query run both ways here, timed, with the documents only one of them returned.
+ */
+export async function accuracy(namespace: string, query: string, filters: Filter | null, topK: number): Promise<Accuracy> {
+  const ns = tp().namespace(namespace);
+  const f = filters ? { filters } : {};
+  const err = (e: unknown) => ({ error: String((e as Error)?.message ?? e).slice(0, 240) });
+  const rank = (m: "ANN" | "kNN") => ["text", m, ["Embed", query]];
+  const timed = async (m: "ANN" | "kNN") => {
+    const req = { rank_by: rank(m), top_k: topK, ...f };
+    const t0 = performance.now();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: `accuracy-${m.toLowerCase()}` });
+    return { ids: ((res.rows ?? []) as Row[]).map((r) => String(r.id)), serverMs: num(res.performance?.server_total_ms), roundMs: performance.now() - t0 };
+  };
+  const [thisQuery, sampled, timing] = await Promise.all([
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ns.recall({ rank_by: rank("ANN"), top_k: topK, num: 1, ...f } as any)
+      .then((r) => ({ recall: r.avg_recall, annCount: r.avg_ann_count, exhaustiveCount: r.avg_exhaustive_count }), err),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ns.recall({ num: 20, top_k: topK, ...f } as any).then((r) => ({ recall: r.avg_recall, searches: 20 }), err),
+    Promise.all([timed("ANN"), timed("kNN")]).then(([a, k]) => {
+      const exact = new Set(k.ids);
+      const approx = new Set(a.ids);
+      return {
+        annServerMs: a.serverMs, knnServerMs: k.serverMs, annRoundMs: a.roundMs, knnRoundMs: k.roundMs,
+        overlap: k.ids.length ? a.ids.filter((id) => exact.has(id)).length / k.ids.length : 1,
+        onlyExact: k.ids.filter((id) => !approx.has(id)), onlyAnn: a.ids.filter((id) => !exact.has(id)),
+      };
+    }, err),
+  ]);
+  return { namespace, topK, thisQuery, sampled, timing };
+}
+
+const num = (v: unknown) => (typeof v === "number" ? v : null);
 
 // ------------------------------------------------------------------ patients and notes
 

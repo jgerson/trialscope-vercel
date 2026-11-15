@@ -81,8 +81,20 @@ export interface NamespaceRun {
   check?: FusionCheck | null;
   ranking?: RunRanking | null;
   rerank?: RunRerank | null;
+  /** How the vector subquery ran: approximate (ANN index) or exact (kNN, every document compared). */
+  vectorSearch?: { method: "ann" | "knn"; error: string | null } | null;
   /** turbopuffer-side diversification: at most `per` results per value of `attribute`, per subquery. */
   diversify?: { attribute: string; per: number } | null;
+}
+
+/** ANN accuracy for one namespace, from turbopuffer's recall endpoint plus a timed ANN vs exact comparison. */
+export interface Accuracy {
+  namespace: string;
+  topK: number;
+  thisQuery: { recall: number; annCount: number; exhaustiveCount: number } | { error: string };
+  sampled: { recall: number; searches: number } | { error: string };
+  timing: { annServerMs: number | null; knnServerMs: number | null; annRoundMs: number; knnRoundMs: number; overlap: number;
+    onlyExact: string[]; onlyAnn: string[] } | { error: string };
 }
 
 /** What model reranking did on one namespace. */
@@ -157,6 +169,7 @@ export interface SearchResponse {
   fusion: Fusion;
   ranking: import("./ranking").Ranking | null;
   diversify: import("./grouping").Diversify | null;
+  vectorExact: boolean;
   topK: number;
   rrfK: number;
   wallMs: number;

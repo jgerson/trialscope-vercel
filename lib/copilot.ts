@@ -41,6 +41,10 @@ const TOOLS: Anthropic.Tool[] = [
             "Rerank the hybrid candidates with a relevance model that reads each document against the query. Slower and " +
             "costlier, much better at nuance: 'after X', exclusions, eligibility conditions. Ignores ranking boosts.",
         },
+        exact_vector: {
+          type: "boolean",
+          description: "Exact (kNN) vector search instead of approximate (ANN). Worth it on small sets: one patient's notes, or a tightly filtered trial search.",
+        },
         max_per_source_group: {
           type: "integer", minimum: 1, maximum: 5,
           description: "Diversify: at most this many results per trial sponsor / PubMed journal, so one doesn't dominate.",
@@ -276,6 +280,7 @@ async function copilotLoop(
       ranking: isActive(ranking) ? ranking : null, patient,
       fusion: input.rerank === true && mode === "hybrid" ? "rerank" : "server",
       diversify: parseDiversify({ by: "org", per: input.max_per_source_group }),
+      exact: input.exact_vector === true,
     });
     updateActiveObservation({
       metadata: {

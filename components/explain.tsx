@@ -2,7 +2,7 @@
 // The right-hand panel: how the search ran, or why one result ranked where it did.
 import { useEffect, useState } from "react";
 import { ArrowUpRight, X } from "lucide-react";
-import type { FusionCheck, Hit, NamespaceRun, SearchResponse } from "@/lib/types";
+import type { Accuracy, FusionCheck, Hit, NamespaceRun, SearchResponse } from "@/lib/types";
 import { cx, SourceTag } from "./ui";
 
 export function RunOverview({ data }: { data: SearchResponse }) {
@@ -25,14 +25,14 @@ export function RunOverview({ data }: { data: SearchResponse }) {
       </div>
       <p className="mt-1 text-[13px] leading-relaxed text-slate">{how}{n > 1 ? " Results from each source are then merged by rank." : ""}</p>
       <div className="mt-4 divide-y divide-line">
-        {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} />)}
+        {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} query={data.query} />)}
       </div>
       <p className="mt-4 text-[12.5px] text-slate">Select a result to see why it ranked where it did.</p>
     </div>
   );
 }
 
-function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"] }) {
+function RunRow({ run, mode, query }: { run: NamespaceRun; mode: SearchResponse["mode"]; query: string }) {
   return (
     <div className="py-3">
       <div className="flex items-baseline gap-2">
@@ -46,6 +46,13 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
       </p>
       {run.fusion === "server" && <FusionBadge check={run.check ?? null} />}
       {run.ranking && <RankingNote ranking={run.ranking} />}
+      {run.vectorSearch && (
+        <p className={cx("mt-1.5 text-[12.5px]", run.vectorSearch.error ? "text-amber-800" : "text-slate")}>
+          {run.vectorSearch.error ?? (run.vectorSearch.method === "knn"
+            ? "Vector side ran exact (kNN): every document that passed the filters was compared."
+            : "Vector side ran approximate (ANN) on turbopuffer's index.")}
+        </p>
+      )}
       {run.rerank && <RerankNote rerank={run.rerank} serverMs={run.serverMs} />}
       {run.diversify && (
         <p className="mt-1.5 text-[12.5px] text-slate">
@@ -64,6 +71,66 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         </pre>
       </details>
       {run.request != null && <PlanAndConsistency run={run} mode={mode} />}
+      {run.request != null && mode !== "bm25" && <AnnAccuracy run={run} query={query} />}
+    </div>
+  );
+}
+
+/**
+ * On request: how accurate ANN was for this query. turbopuffer's recall endpoint runs ANN and an exhaustive search
+ * itself (for this query, and for 20 sampled vectors), and the app times the same vector query both ways.
+ */
+function AnnAccuracy({ run, query }: { run: NamespaceRun; query: string }) {
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [out, setOut] = useState<Accuracy | null>(null);
+  const go = async () => {
+    setState("loading");
+    try {
+      const r = await fetch("/api/accuracy", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ namespace: run.namespace, query, request: run.request }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      setOut(j); setState("idle");
+    } catch {
+      setState("error");
+    }
+  };
+  if (!out) {
+    return (
+      <button type="button" onClick={go} disabled={state === "loading"}
+        className="mt-1.5 block text-[12.5px] text-slate underline decoration-dotted underline-offset-2 hover:text-ink disabled:opacity-60">
+        {state === "loading" ? "Comparing ANN with exact search…" : state === "error" ? "Couldn't check. Try again" : "Check ANN accuracy (vs exact)"}
+      </button>
+    );
+  }
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const failed = (x: object): x is { error: string } => "error" in x;
+  return (
+    <div className="mt-2 space-y-1.5 rounded-lg border border-line p-3 text-[12.5px] leading-relaxed">
+      <p className="font-semibold text-ink">ANN accuracy, top {out.topK}</p>
+      <p className="text-ink-2">
+        This query: {failed(out.thisQuery) ? <span className="text-slate">recall endpoint unavailable ({out.thisQuery.error})</span>
+          : <><b className="tabular-nums">{pct(out.thisQuery.recall)}</b> of the true nearest neighbors found by ANN (turbopuffer recall endpoint)</>}
+      </p>
+      <p className="text-ink-2">
+        Namespace sample: {failed(out.sampled) ? <span className="text-slate">unavailable ({out.sampled.error})</span>
+          : <><b className="tabular-nums">{pct(out.sampled.recall)}</b> average recall over {out.sampled.searches} random searches</>}
+      </p>
+      {failed(out.timing) ? <p className="text-slate">Timing comparison unavailable ({out.timing.error})</p> : (
+        <>
+          <table className="mt-1 w-full">
+            <thead><tr className="text-slate"><th className="text-left font-normal" /><th className="text-right font-normal">server</th><th className="text-right font-normal">round trip</th></tr></thead>
+            <tbody>
+              <tr><td className="text-ink-2">Approximate (ANN)</td><td className="text-right tabular-nums">{out.timing.annServerMs ?? "–"} ms</td><td className="text-right tabular-nums text-slate">{Math.round(out.timing.annRoundMs)} ms</td></tr>
+              <tr><td className="text-ink-2">Exact (kNN)</td><td className="text-right tabular-nums">{out.timing.knnServerMs ?? "–"} ms</td><td className="text-right tabular-nums text-slate">{Math.round(out.timing.knnRoundMs)} ms</td></tr>
+            </tbody>
+          </table>
+          <p className="text-slate">
+            Same top {out.topK} from both: {pct(out.timing.overlap)}.
+            {out.timing.onlyExact.length ? ` Only exact found: ${out.timing.onlyExact.slice(0, 5).join(", ")}${out.timing.onlyExact.length > 5 ? "…" : ""}.` : " ANN missed nothing."}
+          </p>
+        </>
+      )}
     </div>
   );
 }

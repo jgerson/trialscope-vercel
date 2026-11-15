@@ -210,6 +210,12 @@ npm run dev                  # http://localhost:3000
     documents have exactly equal scores count as ties, since turbopuffer doesn't document its
     tie-break. `FUSION_VERIFY=false` skips the extra request (and the per-list ranks with it).
   - **In app**: turbopuffer returns the two lists and the app fuses them, as before.
+- **Vector: Approximate | Exact** picks how the vector subquery runs: `["text", "ANN", ["Embed", q]]` (the index,
+  fast, ~90–95% recall) or `["text", "kNN", ["Embed", q]]` (every document that passes the filters, always the true
+  nearest neighbors). If kNN is rejected it falls back to ANN and says so. In Explain, **Check ANN accuracy** asks
+  turbopuffer's recall endpoint for this query's recall (`rank_by` + filters, `num: 1`) and for a 20-search sample of
+  the namespace, and times the same vector query both ways, listing anything only exact search found. The copilot can
+  set `exact_vector`.
 - **Model rerank** (a third **Fused by** option, and the copilot's `rerank: true`): the same multi-query with
   `rerank_by: { model, attribute: "text", query }` instead of RRF. Each subquery returns 20/30/40 candidates (with
   `text` for the model to read), turbopuffer scores them with the model, and the top `topK` come back. The unfused

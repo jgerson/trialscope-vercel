@@ -16,7 +16,7 @@ export async function POST(req: Request) {
   if (user instanceof Response) return user;
   const body = (await req.json()) as {
     q: string; sources?: Source[]; scope?: string; mode: Mode; fusion?: Fusion; filters: SearchFilters; topK?: number;
-    patientId?: string; ranking?: unknown; diversify?: unknown; candidates?: number;
+    patientId?: string; ranking?: unknown; diversify?: unknown; candidates?: number; exact?: boolean;
   };
   const q = (body.q ?? "").trim().slice(0, 500);
   if (!q) return NextResponse.json({ error: "Type something to search for." }, { status: 400 });
@@ -45,11 +45,11 @@ export async function POST(req: Request) {
   // One Langfuse trace per search (tagged "search"), with each namespace's turbopuffer call nested under it.
   after(flushLangfuse);
   try {
-    const res = await newTrace({ userId: user, tags: ["search"], metadata: { sources, mode, fusion, topK, boosts, diversify } }, () =>
+    const res = await newTrace({ userId: user, tags: ["search"], metadata: { sources, mode, fusion, topK, boosts, diversify, exact: body.exact === true } }, () =>
       startActiveObservation("search-page", async (obs) => {
         obs.update({ input: { q, sources, mode, fusion, boosts, topK, filters: f, patientId: patient?.id ?? null } });
         const out = await search(targets, q, mode, topK, { fusion, ranking: isActive(ranking) ? ranking : null, patient,
-          diversify, candidates });
+          diversify, candidates, exact: body.exact === true });
         obs.update({ output: { wallMs: Math.round(out.wallMs), hits: out.hits.length,
           rerank: out.runs.filter((r) => r.rerank).map((r) => ({ ns: r.short, ...r.rerank })),
           fusionChecks: out.runs.filter((r) => r.check).map((r) => ({ ns: r.short, matches: r.check!.matches, sameIds: r.check!.sameIds,
