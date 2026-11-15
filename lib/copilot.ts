@@ -38,8 +38,8 @@ const TOOLS: Anthropic.Tool[] = [
         rerank: {
           type: "boolean",
           description:
-            "Rerank the hybrid candidates with a relevance model that reads each document against the query. Slower and " +
-            "costlier, much better at nuance: 'after X', exclusions, eligibility conditions. Ignores ranking boosts.",
+            "Rerank the hybrid candidates with a relevance model (adds about half a second per search). Only set it when " +
+            "the user explicitly asks for the most precise or best-matching results, or to rerank. Ignores ranking boosts.",
         },
         exact_vector: {
           type: "boolean",
@@ -86,8 +86,9 @@ never the patient. Don't exclude or question a note because of who wrote it.
 - Ground every claim in tool results and cite it with the tag shown in the result, like [N2], [P1] or [T3].
 - For trial matching, first read the patient's notes, extract diagnosis, stage, biomarkers, age, sex and location, then \
 search trials with filters (usually status Recruiting or Not yet recruiting, the patient's country, and match_patient_age_sex).
-- Set rerank=true for nuanced trial-eligibility or treatment-sequence questions; leave it off for simple lookups (drug \
-names, NCT ids). Use max_per_source_group when results look dominated by one sponsor or journal.
+- ${config.copilotRerank === "auto"
+    ? "Set rerank=true for nuanced trial-eligibility or treatment-sequence questions; leave it off for simple lookups."
+    : "Leave rerank off unless the user explicitly asks for the best or most precise matches, or asks you to rerank: it adds about half a second to every search."} Use max_per_source_group when results look dominated by one sponsor or journal.
 - Ranking boosts (the search tool's "ranking" field) reorder results without removing any. Prefer them over hard filters \
 when the user expresses a preference ("recent", "strong evidence", "late-phase") rather than a requirement.
 - Say plainly that eligibility needs physician review against the full protocol. Do not give treatment advice.
@@ -278,7 +279,10 @@ async function copilotLoop(
     });
     const res = await search(targets, String(input.query ?? ""), mode, topK, {
       ranking: isActive(ranking) ? ranking : null, patient,
-      fusion: input.rerank === true && mode === "hybrid" ? "rerank" : "server",
+      // COPILOT_RERANK: "ask" (default) and "auto" honour the model's flag (the prompt limits "ask" to explicit requests);
+      // "never" and "always" override it.
+      fusion: mode === "hybrid" && (config.copilotRerank === "always" || (config.copilotRerank !== "never" && input.rerank === true))
+        ? "rerank" : "server",
       diversify: parseDiversify({ by: "org", per: input.max_per_source_group }),
       exact: input.exact_vector === true,
     });

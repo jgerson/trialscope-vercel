@@ -16,15 +16,21 @@ export const config = {
   // system prompt, tools and earlier turns; cached, those cost a fraction of the input price on the next call.
   promptCache: ["1", "true", "yes"].includes((process.env.COPILOT_PROMPT_CACHE ?? "").toLowerCase()),
   embedModel: "voyage/voyage-4-lite",
-  // Hybrid search fuses on turbopuffer (rerank_by ["RRF"]). With verification on (the default), each hybrid search also
-  // fetches the two unfused lists in parallel, recomputes RRF in the app, and checks the two agree. That second request
-  // is what powers the per-list ranks in the Explain panel. FUSION_VERIFY=false skips it.
+  // Hybrid search fuses on turbopuffer (rerank_by ["RRF"]). Verification re-runs the two subqueries unfused, recomputes
+  // RRF in the app and checks the two agree; it also powers the per-list ranks in the Explain panel (see fusionVerify).
   // Ranking boosts map BM25 into 0..1 with Saturate; this is the BM25 score that becomes 0.5 (see lib/ranking.ts).
   bm25Midpoint: Number(process.env.BOOST_BM25_MIDPOINT) > 0 ? Number(process.env.BOOST_BM25_MIDPOINT) : 6,
   // Model reranking (Fused by → Model rerank): turbopuffer's rerank_by with this model over the `text` attribute.
   rerankModel: process.env.RERANK_MODEL || "zeroentropy/zerank-2",
-  rerankCandidates: Math.min(100, Math.max(10, Number(process.env.RERANK_CANDIDATES) || 30)),
-  fusionVerify: !["0", "false", "no"].includes((process.env.FUSION_VERIFY ?? "").toLowerCase()),
+  rerankCandidates: Math.min(100, Math.max(10, Number(process.env.RERANK_CANDIDATES) || 20)),
+  // How the app checks turbopuffer's RRF against its own: "lazy" (default) fetches the unfused lists only when you open
+  // Explain; "always" fetches them with every hybrid search (one extra request per source); "off" never does.
+  fusionVerify: ((v) => (["always", "true", "1"].includes(v) ? "always" : ["off", "false", "0", "no"].includes(v) ? "off" : "lazy"))(
+    (process.env.FUSION_VERIFY ?? "").toLowerCase()) as "lazy" | "always" | "off",
+  // Copilot model reranking: "ask" (default) only when the question explicitly asks for it; "auto" lets the model decide;
+  // "never" and "always" override it.
+  copilotRerank: ((v) => (["auto", "never", "always"].includes(v) ? v : "ask"))((process.env.COPILOT_RERANK ?? "").toLowerCase()) as
+    "ask" | "auto" | "never" | "always",
 };
 
 export const copilotEnabled = Boolean(config.anthropicKey || config.gatewayKey || config.onVercel);

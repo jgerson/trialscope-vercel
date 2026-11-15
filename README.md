@@ -55,9 +55,10 @@ All patients are synthetic. Personal account details are blurred.
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `COPILOT_PROMPT_CACHE` | `true` turns on Anthropic prompt caching for the copilot (optional; off by default) |
    | `RERANK_MODEL` | reranking model for **Model rerank** (optional; default `zeroentropy/zerank-2`, must be enabled in your turbopuffer region) |
-   | `RERANK_CANDIDATES` | default candidates per list sent to the reranker (optional; 30) |
+   | `RERANK_CANDIDATES` | default candidates per list sent to the reranker (optional; 20) |
    | `BOOST_BM25_MIDPOINT` | BM25 score that ranking boosts treat as 0.5 relevance (optional; default 6) |
-   | `FUSION_VERIFY` | `false` skips the parallel unfused request that checks turbopuffer's RRF against the app's (optional; on by default) |
+   | `FUSION_VERIFY` | when to check turbopuffer's RRF against the app's: `lazy` (default, only when Explain opens), `always` (with every hybrid search), `off` |
+   | `COPILOT_RERANK` | copilot model reranking: `ask` (default, only when the question asks for it), `auto` (the model decides), `never`, `always` |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
    | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
@@ -208,11 +209,11 @@ npm run dev                  # http://localhost:3000
 - **Hybrid** sends one `multiQuery` with a vector subquery and a BM25 subquery, fused with
   reciprocal rank fusion (k = 60). A **Fused by** toggle picks where:
   - **turbopuffer** (default): the request carries `rerank_by: ["RRF"]` and `limit`, and turbopuffer
-    returns one fused list with the RRF score in `$dist`. In parallel, the app fetches the two
-    unfused lists, recomputes RRF itself and compares: the Explain panel shows a ✓ (or the first
+    returns one fused list with the RRF score in `$dist`. When you open Explain (or with every search,
+    if `FUSION_VERIFY=always`), the app fetches the two unfused lists, recomputes RRF itself and compares: the Explain panel shows a ✓ (or the first
     position that differs) per namespace, plus both scores for each result. Positions where two
     documents have exactly equal scores count as ties, since turbopuffer doesn't document its
-    tie-break. `FUSION_VERIFY=false` skips the extra request (and the per-list ranks with it).
+    tie-break. `FUSION_VERIFY=off` turns the check (and the per-list ranks) off.
   - **In app**: turbopuffer returns the two lists and the app fuses them, as before.
 - **Vector: Approximate | Exact** picks how the vector subquery runs: `["text", "ANN", ["Embed", q]]` (the index,
   fast, ~90–95% recall) or `["text", "kNN", ["Embed", q]]` (every document that passes the filters, always the true

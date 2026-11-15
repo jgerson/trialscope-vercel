@@ -9,7 +9,7 @@ import { COMPUTED, isActive, keywordPlan, type Ranking } from "./ranking";
 import { diversifyAttr, type Diversify } from "./grouping";
 import { facetClause, facetsFor, PATIENT_FIT, refineClauses, valueLabel, type FacetCounts, type FacetKey, type FacetValue,
   type SourceFacets } from "./facets";
-import type { Accuracy, CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
+import type { Accuracy, Verification, CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
@@ -354,7 +354,7 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       serverMs: num("server_total_ms"), embeddingMs: num("embedding_ms"),
       cache: typeof perf.cache_temperature === "string" ? perf.cache_temperature : null,
       docs: num("approx_namespace_size"), filters: describeFilter(filter), request,
-      ...(mode === "hybrid" ? { fusion: effective, check } : {}),
+      ...(mode === "hybrid" ? { fusion: effective, check, verifyLater: effective === "server" && !check && config.fusionVerify === "lazy" } : {}),
       rerank: reranking ? {
         model: config.rerankModel, candidates: perList,
         changedTop: shifts.filter((x) => x > 0).length,
@@ -379,7 +379,7 @@ export async function search(targets: { namespace: string; filter: Filter | null
     diversify?: Diversify | null; candidates?: number; exact?: boolean } = {}): Promise<SearchResponse> {
   const fusion: Fusion = opts.fusion ?? "server";
   const ranking = isActive(opts.ranking) ? opts.ranking! : null;
-  const verify = opts.verify ?? config.fusionVerify;
+  const verify = opts.verify ?? config.fusionVerify === "always";
   const terms = queryTerms(query);
   const t0 = performance.now();
   const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms, fusion, verify, ranking,
@@ -393,6 +393,30 @@ export async function search(targets: { namespace: string; filter: Filter | null
   const hits: Hit[] = merged.map((h, i) => ({ ...h, overall: i + 1 }));
 
   return { query, mode, fusion, ranking, diversify: opts.diversify ?? null, vectorExact: !!opts.exact, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
+}
+
+// ------------------------------------------------------------------ on-demand RRF verification
+
+/**
+ * Verify a server-fused hybrid search after the fact (FUSION_VERIFY=lazy): re-run the same two subqueries unfused,
+ * recompute RRF in the app, and compare with the order and scores turbopuffer returned. Also gives each result its
+ * vector and BM25 ranks for the Explain panel. Runs only when someone opens Explain, not on every search.
+ */
+export async function verifyFusion(namespace: string, queries: Record<string, unknown>[], server: { id: string; score: number }[],
+  topK: number): Promise<Verification> {
+  const req = { queries: queries.slice(0, 2) };
+  const t0 = performance.now();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res: any = await tpCall("multi_query", namespace, req, () => tp().namespace(namespace).multiQuery(req as any), { label: "search-verify" });
+  const verifyMs = performance.now() - t0;
+  const app = fuseInApp({ vector: res.results?.[0]?.rows ?? [], bm25: res.results?.[1]?.rows ?? [] });
+  const check = compareFusion(server.map((s) => ({ id: s.id, $dist: s.score })), byFused(app).slice(0, topK), verifyMs);
+  const signals: Verification["signals"] = {};
+  for (const s of server) {
+    const d = app.get(s.id);
+    if (d) signals[s.id] = { vector: d.vector, bm25: d.bm25, appFused: d.fused };
+  }
+  return { check, signals };
 }
 
 // ------------------------------------------------------------------ ANN accuracy

@@ -79,6 +79,8 @@ export interface NamespaceRun {
   /** Hybrid only: who fused, and (server fusion with verification) whether the app's RRF agreed. */
   fusion?: Fusion;
   check?: FusionCheck | null;
+  /** Server fusion without the check run inline: the Explain panel fetches it on demand from /api/verify. */
+  verifyLater?: boolean;
   ranking?: RunRanking | null;
   rerank?: RunRerank | null;
   /** How the vector subquery ran: approximate (ANN index) or exact (kNN, every document compared). */
@@ -120,6 +122,12 @@ export interface RunRanking {
   breakdown: boolean; // per-result breakdown available
   bm25Midpoint: number;
   error: string | null; // set when turbopuffer rejected part of the boost request and the search stepped down
+}
+
+/** On-demand check for one namespace: per-result vector/BM25 ranks and the app's RRF, plus the comparison. */
+export interface Verification {
+  check: FusionCheck;
+  signals: Record<string, { vector: Signal | null; bm25: Signal | null; appFused: number }>;
 }
 
 /** Server-side RRF compared with the app's own RRF over the same two unfused lists. */

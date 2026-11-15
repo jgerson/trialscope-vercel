@@ -61,7 +61,7 @@ export function SearchView() {
   const [mode, setMode] = useState<Mode>((params.get("mode") as Mode) || "hybrid");
   const [fusion, setFusion] = useState<Fusion>(
     params.get("fusion") === "app" ? "app" : params.get("fusion") === "rerank" ? "rerank" : "server");
-  const [candidates, setCandidates] = useState<number>(CANDIDATES.includes(Number(params.get("cand"))) ? Number(params.get("cand")) : 30);
+  const [candidates, setCandidates] = useState<number>(CANDIDATES.includes(Number(params.get("cand"))) ? Number(params.get("cand")) : 20);
   // Display grouping (browser only) and turbopuffer-side diversification (?div=org-2: at most 2 per sponsor/journal).
   const [groupBy, setGroupBy] = useState<GroupKey | "">((GROUPS.find((g) => g.key === params.get("group"))?.key) ?? "");
   const [diversify, setDiversify] = useState(() => {
@@ -147,7 +147,7 @@ export function SearchView() {
     if (mode !== "hybrid") sp.set("mode", mode);
     else if (fusion === "app") sp.set("fusion", "app");
     if (rankingKey) sp.set("rk", rankingKey);
-    if (mode === "hybrid" && fusion === "rerank") { sp.set("fusion", "rerank"); if (candidates !== 30) sp.set("cand", String(candidates)); }
+    if (mode === "hybrid" && fusion === "rerank") { sp.set("fusion", "rerank"); if (candidates !== 20) sp.set("cand", String(candidates)); }
     if (divKey) sp.set("div", divKey);
     if (mode !== "bm25" && vectorMethod === "exact") sp.set("vec", "exact");
     if (groupBy) sp.set("group", groupBy);

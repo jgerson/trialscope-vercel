@@ -2,8 +2,42 @@
 // The right-hand panel: how the search ran, or why one result ranked where it did.
 import { useEffect, useState } from "react";
 import { ArrowUpRight, X } from "lucide-react";
-import type { Accuracy, FusionCheck, Hit, NamespaceRun, SearchResponse } from "@/lib/types";
+import type { Accuracy, FusionCheck, Hit, NamespaceRun, SearchResponse, Verification } from "@/lib/types";
 import { cx, SourceTag } from "./ui";
+
+// ---------------------------------------------------------------- deferred RRF verification (FUSION_VERIFY=lazy)
+
+// One request per (search, namespace), shared by the overview badge and every result's Explain panel.
+const verifications = new Map<string, Promise<Verification>>();
+
+function verificationFor(data: SearchResponse, run: NamespaceRun): Promise<Verification> {
+  const key = `${data.query}|${run.namespace}|${JSON.stringify(run.request)}`;
+  let p = verifications.get(key);
+  if (!p) {
+    const hits = data.hits.filter((h) => h.namespace === run.namespace).sort((a, b) => a.nsRank - b.nsRank)
+      .map((h) => ({ id: h.id, score: h.fused }));
+    p = fetch("/api/verify", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ namespace: run.namespace, request: run.request, hits }) })
+      .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j as Verification; });
+    p.catch(() => verifications.delete(key)); // let a failed check be retried
+    verifications.set(key, p);
+  }
+  return p;
+}
+
+/** The check for one namespace: inline when the search already ran it, otherwise fetched on demand. */
+function useVerification(data: SearchResponse, run: NamespaceRun | undefined, auto: boolean) {
+  const [state, setState] = useState<{ v: Verification | null; loading: boolean; error: boolean }>({ v: null, loading: false, error: false });
+  const lazy = !!run?.verifyLater && !run.check;
+  const load = () => {
+    if (!run || !lazy) return;
+    setState((s) => ({ ...s, loading: true, error: false }));
+    verificationFor(data, run).then((v) => setState({ v, loading: false, error: false }), () => setState({ v: null, loading: false, error: true }));
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setState({ v: null, loading: false, error: false }); if (auto && lazy) load(); }, [data, run?.namespace, auto]);
+  return { ...state, lazy, load };
+}
 
 export function RunOverview({ data }: { data: SearchResponse }) {
   const n = data.runs.length;
@@ -25,14 +59,15 @@ export function RunOverview({ data }: { data: SearchResponse }) {
       </div>
       <p className="mt-1 text-[13px] leading-relaxed text-slate">{how}{n > 1 ? " Results from each source are then merged by rank." : ""}</p>
       <div className="mt-4 divide-y divide-line">
-        {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} query={data.query} />)}
+        {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} query={data.query} data={data} />)}
       </div>
       <p className="mt-4 text-[12.5px] text-slate">Select a result to see why it ranked where it did.</p>
     </div>
   );
 }
 
-function RunRow({ run, mode, query }: { run: NamespaceRun; mode: SearchResponse["mode"]; query: string }) {
+function RunRow({ run, mode, query, data }: { run: NamespaceRun; mode: SearchResponse["mode"]; query: string; data: SearchResponse }) {
+  const ver = useVerification(data, run, false);
   return (
     <div className="py-3">
       <div className="flex items-baseline gap-2">
@@ -44,7 +79,14 @@ function RunRow({ run, mode, query }: { run: NamespaceRun; mode: SearchResponse[
         {run.hits} hits. Server time includes {run.embeddingMs ?? 0} ms to embed the query; {run.cache ?? "unknown"} cache;{" "}
         {Math.round(run.roundMs)} ms round trip.
       </p>
-      {run.fusion === "server" && <FusionBadge check={run.check ?? null} />}
+      {run.fusion === "server" && (ver.lazy && !ver.v
+        ? (
+          <button type="button" onClick={ver.load} disabled={ver.loading}
+            className="mt-1.5 block text-[12.5px] text-slate underline decoration-dotted underline-offset-2 hover:text-ink disabled:opacity-60">
+            {ver.loading ? "Checking against the app's RRF…" : ver.error ? "Couldn't check. Try again" : "Check turbopuffer's RRF against the app's"}
+          </button>
+        )
+        : <FusionBadge check={ver.v?.check ?? run.check ?? null} />)}
       {run.ranking && <RankingNote ranking={run.ranking} />}
       {run.vectorSearch && (
         <p className={cx("mt-1.5 text-[12.5px]", run.vectorSearch.error ? "text-amber-800" : "text-slate")}>
@@ -164,7 +206,7 @@ function RankingNote({ ranking }: { ranking: NonNullable<NamespaceRun["ranking"]
 /** Did turbopuffer's RRF agree with the app's? Shown under each namespace when fusion ran on turbopuffer. */
 function FusionBadge({ check }: { check: FusionCheck | null }) {
   if (!check) {
-    return <p className="mt-1.5 text-[12.5px] text-slate">Fused on turbopuffer. Verification is off (FUSION_VERIFY=false), so per-list ranks aren&apos;t shown.</p>;
+    return <p className="mt-1.5 text-[12.5px] text-slate">Fused on turbopuffer. Verification is off (FUSION_VERIFY=off), so per-list ranks aren&apos;t shown.</p>;
   }
   const diff = check.maxScoreDiff < 1e-9 ? "0" : check.maxScoreDiff.toExponential(1);
   return (
@@ -176,7 +218,7 @@ function FusionBadge({ check }: { check: FusionCheck | null }) {
         : <>⚠ turbopuffer&apos;s RRF differs from the app&apos;s
           {check.firstMismatch ? ` at #${check.firstMismatch.position} (turbopuffer ${check.firstMismatch.server}, app ${check.firstMismatch.app})` : ""}
           ; {check.sameIds}/{check.compared} positions identical, max score difference {diff}.</>}
-      <span className="text-slate"> Check request: {Math.round(check.verifyMs)} ms, run in parallel.</span>
+      <span className="text-slate"> Check request: {Math.round(check.verifyMs)} ms.</span>
     </div>
   );
 }
@@ -287,10 +329,14 @@ function Signal({ title, sig, topK, children }: { title: string; sig: Hit["vecto
   );
 }
 
-export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search overview" }:
+export function HitExplainer({ hit: shown, data, onClose, closeLabel = "Back to search overview" }:
   { hit: Hit; data: SearchResponse; onClose: () => void; closeLabel?: string }) {
   const k = data.rrfK;
-  const run = data.runs.find((r) => r.namespace === hit.namespace)!;
+  const run = data.runs.find((r) => r.namespace === shown.namespace)!;
+  // With deferred verification, the per-list ranks arrive when this panel opens; merge them into the hit.
+  const ver = useVerification(data, run, true);
+  const sig = ver.v?.signals[shown.id];
+  const hit: Hit = sig ? { ...shown, vector: sig.vector, bm25: sig.bm25, appFused: sig.appFused } : shown;
   const multi = data.runs.length > 1;
   return (
     <div key={hit.key} className="animate-slide-in p-5">
@@ -371,6 +417,8 @@ export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search 
       {data.mode === "hybrid" && (
         <>
           <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">{data.fusion === "rerank" ? "What RRF would have done" : "How the two rankings were combined"}</h4>
+          {ver.loading && <p className="mb-2 text-[12.5px] text-slate">Fetching this result&apos;s vector and keyword ranks…</p>}
+          {ver.error && <p className="mb-2 text-[12.5px] text-amber-800">Couldn&apos;t fetch the per-list ranks for this result.</p>}
           <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
             {hit.vector && <div>vector&nbsp;&nbsp;1/({k}+{hit.vector.rank}) = {(1 / (k + hit.vector.rank)).toFixed(4)}</div>}
             {hit.bm25 && <div>bm25&nbsp;&nbsp;&nbsp;&nbsp;1/({k}+{hit.bm25.rank}) = {(1 / (k + hit.bm25.rank)).toFixed(4)}</div>}
