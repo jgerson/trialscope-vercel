@@ -180,6 +180,7 @@ function StepRow({ step, cited }: { step: Step; cited?: Set<string> }) {
             <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11.5px] text-ink-2">{JSON.stringify(step.input, null, 2)}</pre>
           </div>
           {step.filters && <AppliedFilters filters={step.filters} />}
+          {step.search?.runs.some((r) => r.ranking) && <AppliedBoosts search={step.search} />}
           {!!step.returned?.length && (
             <div>
               <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate">
@@ -232,6 +233,27 @@ function AppliedFilters({ filters }: { filters: { source: string; filters: strin
             {(f.filters.length ? f.filters : ["no filters"]).map((x) => (
               <span key={x} className="rounded-md border border-line bg-surface px-1.5 py-px text-[11.5px] text-ink-2">{x}</span>
             ))}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// The ranking boosts each source actually ran with (or skipped, and why). Boosts reorder; they never remove results.
+function AppliedBoosts({ search }: { search: SearchResponse }) {
+  return (
+    <div>
+      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate">Ranking boosts</p>
+      <ul className="space-y-1">
+        {search.runs.filter((r) => r.ranking).map((r) => (
+          <li key={r.namespace} className="flex flex-wrap items-baseline gap-1.5">
+            <span className="text-[11.5px] font-semibold text-ink-2">{r.short}</span>
+            {r.ranking!.applied.map((x) => (
+              <span key={x} className="rounded-md border border-accent/30 bg-accent-soft px-1.5 py-px text-[11.5px] text-ink-2">{x}</span>
+            ))}
+            {r.ranking!.skipped.map((x) => <span key={x} className="text-[11.5px] text-slate">skipped: {x}</span>)}
+            {r.ranking!.error && <span className="text-[11.5px] text-amber-800">{r.ranking!.error}</span>}
           </li>
         ))}
       </ul>

@@ -5,7 +5,11 @@ import Turbopuffer from "@turbopuffer/turbopuffer";
 import { config, NS, RRF_K } from "./config";
 import { tpCall } from "./tpuf-log";
 import { tracedFetch } from "./traced-fetch";
-import type { CorpusStat, Facet, Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
+import { COMPUTED, isActive, keywordPlan, type Ranking } from "./ranking";
+import { diversifyAttr, type Diversify } from "./grouping";
+import { facetClause, facetsFor, PATIENT_FIT, refineClauses, valueLabel, type FacetCounts, type FacetKey, type FacetValue,
+  type SourceFacets } from "./facets";
+import type { Accuracy, Verification, CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
@@ -60,6 +64,8 @@ export function buildFilters(kind: Kind, f: SearchFilters, patient?: Patient | n
     if (f.visitFrom) parts.push(["visit_date", "Gte", f.visitFrom]);
     if (f.visitTo) parts.push(["visit_date", "Lte", f.visitTo]);
   }
+  // Faceted refinements (OR within a facet, AND across facets).
+  parts.push(...(refineClauses(kind, f.refine, patient ?? null) as Filter[]));
   if (!parts.length) return null;
   return parts.length === 1 ? parts[0] : ["And", parts];
 }
@@ -109,29 +115,157 @@ function present(kind: Kind, r: Row) {
 
 interface NsResult { run: NamespaceRun; hits: Omit<Hit, "overall" | "rrf">[] }
 
+type Lists = Partial<Record<"vector" | "bm25", Row[]>>;
+type Signals = { row: Row; vector: Hit["vector"]; bm25: Hit["bm25"]; fused: number };
+
+/** The app's own reciprocal rank fusion: Σ 1/(k + rank) over the lists a document appears in, ranks from 1. */
+function fuseInApp(lists: Lists): Map<string, Signals> {
+  const docs = new Map<string, Signals>();
+  for (const [name, rows] of Object.entries(lists) as ["vector" | "bm25", Row[]][]) {
+    rows.forEach((row, i) => {
+      const id = String(row.id);
+      const d = docs.get(id) ?? { row, vector: null, bm25: null, fused: 0 };
+      d[name] = { rank: i + 1, score: Number(row.$dist ?? 0), of: rows.length };
+      docs.set(id, d);
+    });
+  }
+  for (const d of docs.values()) d.fused = [d.vector, d.bm25].reduce((sum, sig) => sum + (sig ? 1 / (RRF_K + sig.rank) : 0), 0);
+  return docs;
+}
+
+const byFused = (docs: Map<string, Signals>) => [...docs.entries()].sort((a, b) => b[1].fused - a[1].fused);
+
+/**
+ * Compare turbopuffer's fused order with the app's. A position only counts as a mismatch when the documents differ AND
+ * their scores differ: equal RRF scores (e.g. #3 in vector only vs #3 in BM25 only) may come back in either order,
+ * since turbopuffer doesn't document its tie-break.
+ */
+function compareFusion(server: Row[], app: [string, Signals][], verifyMs: number): FusionCheck {
+  const EPS = 1e-9;
+  const appScore = new Map(app.map(([id, d]) => [id, d.fused]));
+  const n = Math.min(server.length, app.length);
+  let sameIds = 0, tieSwaps = 0, maxScoreDiff = 0;
+  let firstMismatch: FusionCheck["firstMismatch"] = null;
+  for (let i = 0; i < n; i++) {
+    const sid = String(server[i].id), aid = app[i][0];
+    const sScore = Number(server[i].$dist ?? 0);
+    const mine = appScore.get(sid);
+    if (mine !== undefined) maxScoreDiff = Math.max(maxScoreDiff, Math.abs(mine - sScore));
+    if (sid === aid) sameIds++;
+    else if (Math.abs(sScore - app[i][1].fused) < EPS) tieSwaps++;
+    else firstMismatch ??= { position: i + 1, server: sid, app: aid };
+  }
+  return { compared: n, sameIds, tieSwaps, maxScoreDiff, firstMismatch, verifyMs, matches: !firstMismatch && maxScoreDiff < 1e-6 };
+}
+
 async function searchNamespace(namespace: string, query: string, mode: Mode, filter: Filter | null, topK: number,
-  terms: string[]): Promise<NsResult> {
+  terms: string[], fusion: Fusion, verify: boolean, ranking: Ranking | null, patient: Patient | null,
+  extra: { diversify: Diversify | null; candidates: number; exact: boolean }): Promise<NsResult> {
   const kind = kindOf(namespace);
-  const base: Record<string, unknown> = { top_k: topK, include_attributes: DISPLAY[kind] };
+  const reranking = mode === "hybrid" && fusion === "rerank";
+  // With model reranking each subquery returns `candidates` rows (not topK), with `text` included for the model to read.
+  const perList = reranking ? Math.max(extra.candidates, topK) : topK;
+  const divAttr = diversifyAttr(extra.diversify, kind);
+  const size: Record<string, unknown> = divAttr
+    ? { limit: { total: perList, per: { attributes: [divAttr], limit: extra.diversify!.per } } }
+    : { top_k: perList };
+  const base: Record<string, unknown> = { ...size, include_attributes: reranking ? [...DISPLAY[kind], "text"] : DISPLAY[kind] };
   if (filter) base.filters = filter;
-  const vec = { ...base, rank_by: ["text", "ANN", ["Embed", query]] };
-  const txt = { ...base, rank_by: ["text", "BM25", query] };
+  // Vector subquery: approximate (the ANN index) by default; exact kNN compares the query with every document that
+  // passes the filters. If turbopuffer rejects kNN here (400), the search falls back to ANN and says so.
+  let vecMethod: "ann" | "knn" = extra.exact && mode !== "bm25" ? "knn" : "ann";
+  let vecError: string | null = null;
+  const vecFor = (m: "ann" | "knn") => ({ ...base, rank_by: ["text", m === "knn" ? "kNN" : "ANN", ["Embed", query]] });
+  let vec = vecFor(vecMethod);
+  // The keyword subquery: plain BM25, or BM25 plus the requested boosts (see lib/ranking.ts). The reranker rescores
+  // everything, so boosts are skipped (and listed as skipped) in that mode.
+  const plan = keywordPlan(kind, query, mode === "vector" || reranking ? null : ranking, patient, config.bm25Midpoint);
+  if (reranking && isActive(ranking)) plan.skipped.push({ key: "recruiting", label: "Ranking boosts", why: "the model reranker rescores every candidate" });
+  const boosted = plan.parts.length > 0;
+  /**
+   * Level 0: boosts with a per-result breakdown (compute_attributes). Level 1: boosts only. Level 2: plain BM25.
+   * The boost expressions can't be tested against every turbopuffer version from here, so a 400 on a boosted request
+   * steps down a level instead of failing the search, and the run says what happened.
+   */
+  const keyword = (level: 0 | 1 | 2) => {
+    if (!boosted || level === 2) return { ...base, rank_by: ["text", "BM25", query] };
+    const f = plan.gate ? (filter ? ["And", [filter, plan.gate]] : plan.gate) : filter;
+    return {
+      ...base, ...(f ? { filters: f } : {}), rank_by: plan.rankBy,
+      ...(level === 0 && plan.compute ? { compute_attributes: plan.compute } : {}),
+    };
+  };
   const strip = (q: Record<string, unknown>) => Object.fromEntries(Object.entries(q).filter(([k]) => k !== "include_attributes"));
-  const request = mode === "vector" ? strip(vec) : mode === "bm25" ? strip(txt) : { queries: [strip(vec), strip(txt)] };
+  const serverFusion = mode === "hybrid" && fusion === "server";
 
   const t0 = performance.now();
-  let lists: Partial<Record<"vector" | "bm25", Row[]>> = {};
+  let lists = {} as Lists;
+  let serverRows = null as Row[] | null; // assigned inside execute(); the cast stops TS narrowing it to null
   let perf: Record<string, unknown> = {};
-  try {
-    const ns = tp().namespace(namespace);
+  let verifyMs = 0;
+  let request: unknown = null;
+  let level: 0 | 1 | 2 = boosted ? 0 : 2;
+  let rankingError: string | null = null;
+  let rerankError: string | null = null;
+  let effective: Fusion = fusion; // what actually ran (rerank falls back to "server" if the model call fails)
+  let compareServerMs: number | null = null;
+  const ns = tp().namespace(namespace);
+
+  const execute = async (txt: Record<string, unknown>) => {
+    // Server fusion: turbopuffer merges the two subqueries itself and returns one list of up to topK, scored in $dist.
+    const fusedReq = { queries: [vec, txt], rerank_by: ["RRF"], limit: topK };
+    request = mode === "vector" ? strip(vec) : mode === "bm25" ? strip(txt)
+      : serverFusion || reranking ? { ...fusedReq, queries: [strip(vec), strip(txt)] } : { queries: [strip(vec), strip(txt)] };
     if (mode === "hybrid") {
-      // One request, two ranked lists back. Fused below with the same RRF formula turbopuffer's
-      // rerank_by ["RRF"] uses (k=60), so each result keeps its rank in both lists for the explainer.
-      const req = { queries: [vec, txt] };
+      const unfusedReq = { queries: [vec, txt] };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await tpCall("multi_query", namespace, req, () => ns.multiQuery(req as any), { label: "search" });
-      lists = { vector: res.results?.[0]?.rows ?? [], bm25: res.results?.[1]?.rows ?? [] };
-      perf = res.performance ?? {};
+      const unfused = (label: string): Promise<any> =>
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        tpCall("multi_query", namespace, unfusedReq, () => ns.multiQuery(unfusedReq as any), { label });
+      if (reranking && !rerankError) {
+        // Model rerank: turbopuffer pools both subqueries' candidates and has the model score each one's `text` against
+        // the query. The unfused lists come back in parallel, so the app knows where RRF would have put each result.
+        const rrReq = { queries: [vec, txt], rerank_by: { model: config.rerankModel, attribute: "text", query }, limit: topK };
+        request = { ...rrReq, queries: [strip(vec), strip(txt)] };
+        try {
+          const tv = performance.now();
+          const [res, raw] = await Promise.all([
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            tpCall("multi_query", namespace, rrReq, () => ns.multiQuery(rrReq as any), { label: "search-rerank" }) as Promise<any>,
+            unfused("search-compare").then((r) => { verifyMs = performance.now() - tv; return r; }),
+          ]);
+          serverRows = res.results?.[0]?.rows ?? [];
+          perf = res.performance ?? {};
+          lists = { vector: raw.results?.[0]?.rows ?? [], bm25: raw.results?.[1]?.rows ?? [] };
+          compareServerMs = typeof raw.performance?.server_total_ms === "number" ? raw.performance.server_total_ms : null;
+          effective = "rerank";
+          return;
+        } catch (e) {
+          const status = (e as { status?: number }).status;
+          if (status === 404) throw e;
+          // Model not enabled in this region, unknown model name, quota… fall back to turbopuffer RRF and say so.
+          rerankError = `Model rerank failed${status ? ` (${status})` : ""}: ${String((e as Error).message).slice(0, 200)}. Showing turbopuffer RRF instead.`;
+          effective = "server";
+        }
+      }
+      if (serverFusion || reranking) {
+        // The fused request gives the results. With verification, the two unfused lists come back in parallel, so the
+        // app can recompute RRF, check it against turbopuffer's, and show each result's rank in both lists.
+        const tv = performance.now();
+        const [fusedRes, raw] = await Promise.all([
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          tpCall("multi_query", namespace, fusedReq, () => ns.multiQuery(fusedReq as any), { label: "search" }) as Promise<any>,
+          verify ? unfused("search-verify").then((r) => { verifyMs = performance.now() - tv; return r; }) : Promise.resolve(null),
+        ]);
+        serverRows = fusedRes.results?.[0]?.rows ?? [];
+        perf = fusedRes.performance ?? {};
+        lists = raw ? { vector: raw.results?.[0]?.rows ?? [], bm25: raw.results?.[1]?.rows ?? [] } : {};
+      } else {
+        // App fusion: one request, two ranked lists back, fused below.
+        const res = await unfused("search");
+        lists = { vector: res.results?.[0]?.rows ?? [], bm25: res.results?.[1]?.rows ?? [] };
+        perf = res.performance ?? {};
+      }
     } else {
       const req = mode === "vector" ? vec : txt;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -139,38 +273,78 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       lists = { [mode]: res.rows ?? [] };
       perf = res.performance ?? {};
     }
+  };
+
+  try {
+    for (;;) {
+      try {
+        await execute(keyword(level));
+        break;
+      } catch (e: unknown) {
+        const status = (e as { status?: number }).status;
+        if (status === 400 && vecMethod === "knn") {
+          vecError = `Exact (kNN) search was rejected: ${String((e as Error).message).slice(0, 200)}. Ran approximate (ANN) instead.`;
+          vecMethod = "ann";
+          vec = vecFor("ann");
+          continue;
+        }
+        if (status === 400 && level < 2) {
+          rankingError = `turbopuffer rejected the ${level === 0 ? "per-result breakdown" : "boost expression"}: ${String((e as Error).message).slice(0, 240)}`;
+          level = (level + 1) as 1 | 2;
+          continue;
+        }
+        throw e;
+      }
+    }
   } catch (e: unknown) {
     if ((e as { status?: number }).status !== 404) throw e;
   }
   const roundMs = performance.now() - t0;
 
-  const docs = new Map<string, { row: Row; vector: Hit["vector"]; bm25: Hit["bm25"] }>();
-  for (const [name, rows] of Object.entries(lists) as ["vector" | "bm25", Row[]][]) {
-    rows.forEach((row, i) => {
-      const id = String(row.id);
-      const d = docs.get(id) ?? { row, vector: null, bm25: null };
-      d[name] = { rank: i + 1, score: Number(row.$dist ?? 0), of: rows.length };
-      docs.set(id, d);
-    });
-  }
-  const scored = [...docs.entries()].map(([id, d]) => {
-    const fused = [d.vector, d.bm25].reduce((sum, sig) => sum + (sig ? 1 / (RRF_K + sig.rank) : 0), 0);
-    return { id, ...d, fused };
-  });
-  scored.sort((a, b) => b.fused - a.fused);
+  const app = fuseInApp(lists);
+  const appOrder = byFused(app);
+  const check = serverRows && verify && effective === "server" ? compareFusion(serverRows, appOrder.slice(0, topK), verifyMs) : null;
+  const rrfRankOf = new Map(appOrder.map(([id], i) => [id, i + 1]));
 
-  const hits = scored.slice(0, topK).map((d, i) => {
+  // The ranked list to show: turbopuffer's order with server fusion, otherwise the app's.
+  const ordered: { id: string; row: Row; fused: number; appFused: number | null; vector: Hit["vector"]; bm25: Hit["bm25"] }[] =
+    serverRows
+      ? serverRows.map((row) => {
+        const id = String(row.id);
+        const mine = app.get(id);
+        return { id, row, fused: Number(row.$dist ?? 0), appFused: mine?.fused ?? null, vector: mine?.vector ?? null, bm25: mine?.bm25 ?? null };
+      })
+      : appOrder.map(([id, d]) => ({ id, row: d.row, fused: d.fused, appFused: null, vector: d.vector, bm25: d.bm25 }));
+
+  // Per-result boost breakdown from the computed attributes (on the keyword list's row, or the fused row).
+  const bm25Rows = new Map((lists.bm25 ?? []).map((r) => [String(r.id), r]));
+  const boostOf = (id: string, row: Row): HitBoost | null => {
+    if (level !== 0) return null;
+    const src = bm25Rows.get(id) ?? row;
+    const rel = src[COMPUTED.relevance];
+    if (typeof rel !== "number") return null;
+    const parts = plan.parts.map((p) => {
+      const raw = Number(src[COMPUTED.part(p.key)] ?? 0);
+      return { key: p.key, label: p.label, weight: p.weight, raw, value: raw * p.weight };
+    });
+    return { relevance: rel, parts, total: rel + parts.reduce((a, b) => a + b.value, 0) };
+  };
+
+  const hits = ordered.slice(0, topK).map((d, i) => {
     const p = present(kind, d.row);
     const visible = `${p.title} ${p.body}`.toLowerCase();
     return {
       key: `${namespace}:${d.id}`, id: d.id, kind, namespace, title: p.title, url: p.url,
       meta: p.meta.filter(Boolean), code: p.code,
       snippet: p.body.length > 420 ? p.body.slice(0, 420) + "…" : p.body,
-      nsRank: i + 1, fused: d.fused, vector: d.vector, bm25: d.bm25,
+      nsRank: i + 1, fused: d.fused, appFused: d.appFused, vector: d.vector, bm25: d.bm25, boost: boostOf(d.id, d.row),
+      ...(effective === "rerank" ? { rerankScore: d.fused, rrfRank: rrfRankOf.get(d.id) ?? null } : {}),
       terms: terms.filter((t) => new RegExp(`\\b${t.replace(/[-]/g, "\\-")}`).test(visible)),
-      raw: d.row as Record<string, unknown>,
+      // `text` (title + body, only fetched for the reranker) duplicates what's shown; keep it out of the response.
+      raw: Object.fromEntries(Object.entries(d.row).filter(([k]) => k !== "text")) as Record<string, unknown>,
     };
   });
+  const shifts = effective === "rerank" ? hits.map((h, i) => Math.abs((rrfRankOf.get(h.id) ?? topK + 1) - (i + 1))) : [];
 
   const num = (k: string) => (typeof perf[k] === "number" ? (perf[k] as number) : null);
   return {
@@ -180,24 +354,111 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       serverMs: num("server_total_ms"), embeddingMs: num("embedding_ms"),
       cache: typeof perf.cache_temperature === "string" ? perf.cache_temperature : null,
       docs: num("approx_namespace_size"), filters: describeFilter(filter), request,
+      ...(mode === "hybrid" ? { fusion: effective, check, verifyLater: effective === "server" && !check && config.fusionVerify === "lazy" } : {}),
+      rerank: reranking ? {
+        model: config.rerankModel, candidates: perList,
+        changedTop: shifts.filter((x) => x > 0).length,
+        avgShift: shifts.length ? shifts.reduce((a, b) => a + b, 0) / shifts.length : 0,
+        retrievalServerMs: compareServerMs, error: rerankError,
+      } : null,
+      diversify: divAttr ? { attribute: divAttr, per: extra.diversify!.per } : null,
+      vectorSearch: mode === "bm25" ? null : { method: vecMethod, error: vecError },
+      ranking: plan.parts.length || plan.skipped.length || rankingError ? {
+        applied: level === 2 ? [] : plan.parts.map((p) => `${p.label} +${p.weight}`),
+        skipped: plan.skipped.map((x) => `${x.label}: ${x.why}`),
+        breakdown: level === 0,
+        bm25Midpoint: plan.bm25Midpoint,
+        error: rankingError,
+      } : null,
     },
   };
 }
 
 export async function search(targets: { namespace: string; filter: Filter | null }[], query: string, mode: Mode,
-  topK: number): Promise<SearchResponse> {
+  topK: number, opts: { fusion?: Fusion; verify?: boolean; ranking?: Ranking | null; patient?: Patient | null;
+    diversify?: Diversify | null; candidates?: number; exact?: boolean } = {}): Promise<SearchResponse> {
+  const fusion: Fusion = opts.fusion ?? "server";
+  const ranking = isActive(opts.ranking) ? opts.ranking! : null;
+  const verify = opts.verify ?? config.fusionVerify === "always";
   const terms = queryTerms(query);
   const t0 = performance.now();
-  const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms)));
+  const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms, fusion, verify, ranking,
+    opts.patient ?? null, { diversify: opts.diversify ?? null, candidates: opts.candidates ?? config.rerankCandidates, exact: !!opts.exact })));
   const wallMs = performance.now() - t0;
 
-  // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order).
+  // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order). This step
+  // always runs in the app: a multi_query, and so turbopuffer's RRF, covers one namespace.
   const merged = parts.flatMap((p) => p.hits.map((h) => ({ ...h, rrf: 1 / (RRF_K + h.nsRank) })));
   merged.sort((a, b) => b.rrf - a.rrf);
   const hits: Hit[] = merged.map((h, i) => ({ ...h, overall: i + 1 }));
 
-  return { query, mode, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
+  return { query, mode, fusion, ranking, diversify: opts.diversify ?? null, vectorExact: !!opts.exact, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
 }
+
+// ------------------------------------------------------------------ on-demand RRF verification
+
+/**
+ * Verify a server-fused hybrid search after the fact (FUSION_VERIFY=lazy): re-run the same two subqueries unfused,
+ * recompute RRF in the app, and compare with the order and scores turbopuffer returned. Also gives each result its
+ * vector and BM25 ranks for the Explain panel. Runs only when someone opens Explain, not on every search.
+ */
+export async function verifyFusion(namespace: string, queries: Record<string, unknown>[], server: { id: string; score: number }[],
+  topK: number): Promise<Verification> {
+  const req = { queries: queries.slice(0, 2) };
+  const t0 = performance.now();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const res: any = await tpCall("multi_query", namespace, req, () => tp().namespace(namespace).multiQuery(req as any), { label: "search-verify" });
+  const verifyMs = performance.now() - t0;
+  const app = fuseInApp({ vector: res.results?.[0]?.rows ?? [], bm25: res.results?.[1]?.rows ?? [] });
+  const check = compareFusion(server.map((s) => ({ id: s.id, $dist: s.score })), byFused(app).slice(0, topK), verifyMs);
+  const signals: Verification["signals"] = {};
+  for (const s of server) {
+    const d = app.get(s.id);
+    if (d) signals[s.id] = { vector: d.vector, bm25: d.bm25, appFused: d.fused };
+  }
+  return { check, signals };
+}
+
+// ------------------------------------------------------------------ ANN accuracy
+
+/**
+ * How accurate was the approximate vector search for this query? Three independent checks, each allowed to fail alone:
+ * - turbopuffer's recall endpoint for this exact rank_by + filters (num 1): it runs ANN and an exhaustive search itself;
+ * - the recall endpoint on 20 searches with random vectors sampled from the namespace (a namespace-level figure);
+ * - the same vector query run both ways here, timed, with the documents only one of them returned.
+ */
+export async function accuracy(namespace: string, query: string, filters: Filter | null, topK: number): Promise<Accuracy> {
+  const ns = tp().namespace(namespace);
+  const f = filters ? { filters } : {};
+  const err = (e: unknown) => ({ error: String((e as Error)?.message ?? e).slice(0, 240) });
+  const rank = (m: "ANN" | "kNN") => ["text", m, ["Embed", query]];
+  const timed = async (m: "ANN" | "kNN") => {
+    const req = { rank_by: rank(m), top_k: topK, ...f };
+    const t0 = performance.now();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: `accuracy-${m.toLowerCase()}` });
+    return { ids: ((res.rows ?? []) as Row[]).map((r) => String(r.id)), serverMs: num(res.performance?.server_total_ms), roundMs: performance.now() - t0 };
+  };
+  const [thisQuery, sampled, timing] = await Promise.all([
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ns.recall({ rank_by: rank("ANN"), top_k: topK, num: 1, ...f } as any)
+      .then((r) => ({ recall: r.avg_recall, annCount: r.avg_ann_count, exhaustiveCount: r.avg_exhaustive_count }), err),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ns.recall({ num: 20, top_k: topK, ...f } as any).then((r) => ({ recall: r.avg_recall, searches: 20 }), err),
+    Promise.all([timed("ANN"), timed("kNN")]).then(([a, k]) => {
+      const exact = new Set(k.ids);
+      const approx = new Set(a.ids);
+      return {
+        annServerMs: a.serverMs, knnServerMs: k.serverMs, annRoundMs: a.roundMs, knnRoundMs: k.roundMs,
+        overlap: k.ids.length ? a.ids.filter((id) => exact.has(id)).length / k.ids.length : 1,
+        onlyExact: k.ids.filter((id) => !approx.has(id)), onlyAnn: a.ids.filter((id) => !exact.has(id)),
+      };
+    }, err),
+  ]);
+  return { namespace, topK, thisQuery, sampled, timing };
+}
+
+const num = (v: unknown) => (typeof v === "number" ? v : null);
 
 // ------------------------------------------------------------------ patients and notes
 
@@ -323,43 +584,95 @@ async function loadCorpusStats(): Promise<Record<string, CorpusStat>> {
   return { trials, pubmed };
 }
 
-const FACET_FIELD: Record<Source, Facet["field"]> = { trials: "status", pubmed: "topic", notes: "note_type" };
 
 /**
  * Counts per value of one field for each source, one aggregate query with group_by per namespace. Each source's other
  * active filters apply, so the counts match what a search would see; the faceted field's own filter is left out so
  * every value stays visible.
  */
-export async function facets(sources: Source[], f: SearchFilters, patient: Patient | null): Promise<Facet[]> {
-  const without: Record<Facet["field"], Partial<SearchFilters>> = {
-    status: { status: [] }, topic: { topic: "" }, note_type: { noteTypes: [] },
+/**
+ * Facet counts for the faceted-search panel, scoped to the query. Per source and per facet, one aggregate Count query
+ * with group_by on the facet's attribute, filtered by every refinement except the facet's own (disjunctive faceting)
+ * plus a ContainsAnyToken gate on `text`, so the counts describe documents containing the query's words. Plus one count
+ * of all matches with every refinement. Queries run in parallel; a failing facet is reported, not fatal.
+ */
+export async function facetCounts(sources: Source[], f: SearchFilters, patient: Patient | null, query: string): Promise<SourceFacets[]> {
+  const gate: Filter | null = query.trim() ? ["text", "ContainsAnyToken", query.trim()] : null;
+  const and = (xs: (Filter | null)[]): Filter | null => {
+    const ps = xs.filter(Boolean) as Filter[];
+    return ps.length === 0 ? null : ps.length === 1 ? ps[0] : ["And", ps];
   };
-  const jobs = sources.flatMap((source) => {
-    const namespace = source === "notes" ? (patient ? NS.patient(patient.id) : null)
-      : source === "trials" ? NS.trials : NS.pubmed;
-    if (!namespace) return [];
-    const field = FACET_FIELD[source];
-    const filter = buildFilters(source, { ...f, ...without[field] }, patient);
-    return [{ source, namespace, field, filter }];
+  const targets = sources.flatMap((source) => {
+    const namespace = source === "notes" ? (patient ? NS.patient(patient.id) : null) : source === "trials" ? NS.trials : NS.pubmed;
+    return namespace ? [{ source, namespace }] : [];
   });
-  return Promise.all(jobs.map(async ({ source, namespace, field, filter }) => {
-    const req: Record<string, unknown> = { aggregate_by: { n: ["Count"] }, group_by: [field], top_k: 50 };
-    if (filter) req.filters = filter;
+
+  return Promise.all(targets.map(async ({ source, namespace }) => {
+    const kind = kindOf(namespace);
+    const ns = tp().namespace(namespace);
     const t0 = performance.now();
-    try {
+    const selectedOf = (k: FacetKey) => f.refine?.[k] ?? [];
+    const without = (k: FacetKey): SearchFilters => ({ ...f, refine: { ...(f.refine ?? {}), [k]: [] } });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const run = (req: Record<string, unknown>, label: string): Promise<any> =>
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await tpCall("query", namespace, req, () => tp().namespace(namespace).query(req as any), { label: "facet-counts" });
-      const groups = ((res.aggregation_groups ?? []) as Record<string, unknown>[])
-        .map((g) => ({ value: String(g[field] ?? ""), count: Number(g.n ?? 0) }))
-        .filter((g) => g.value && g.count)
-        .sort((a, b) => b.count - a.count);
-      return { source, namespace, field, groups, ms: Math.round(performance.now() - t0) };
-    } catch (e) {
-      if ((e as { status?: number }).status === 404) return { source, namespace, field, groups: [], ms: 0 };
-      throw e;
-    }
+      tpCall("query", namespace, req, () => ns.query({ ...req, consistency: { level: "eventual" } } as any), { label });
+
+    const totalP = run({ aggregate_by: { n: ["Count"] }, ...withFilters(and([buildFilters(kind, f, patient), gate])) }, "facet-total")
+      .then((r) => Number(r.aggregations?.n ?? 0)).catch((e) => ((e as { status?: number }).status === 404 ? 0 : null));
+
+    const defs = facetsFor(kind).filter((d) => d.type !== "patient" || patient);
+    const facetsP = defs.map(async (def): Promise<FacetCounts> => {
+      const tf = performance.now();
+      const base = and([buildFilters(kind, without(def.key), patient), gate]);
+      const selected = selectedOf(def.key);
+      try {
+        let values: FacetValue[] = [];
+        if (def.type === "patient") {
+          const clause = facetClause(def, [PATIENT_FIT], patient) as Filter;
+          const r = await run({ aggregate_by: { n: ["Count"] }, ...withFilters(and([base, clause])) }, `facet-${def.key}`);
+          values = [{ value: PATIENT_FIT, label: valueLabel(def, PATIENT_FIT, patient), count: Number(r.aggregations?.n ?? 0), selected: selected.includes(PATIENT_FIT) }];
+        } else {
+          const r = await run({ aggregate_by: { n: ["Count"] }, group_by: [def.attr], top_k: 1000, ...withFilters(base) }, `facet-${def.key}`);
+          const counts = new Map<string, number>();
+          const add = (v: string, n: number) => { if (v && !def.hide?.includes(v)) counts.set(v, (counts.get(v) ?? 0) + n); };
+          for (const g of (r.aggregation_groups ?? []) as Record<string, unknown>[]) {
+            const raw = g[def.attr];
+            const n = Number(g.n ?? 0);
+            if (def.type === "buckets") {
+              const y = Number(raw);
+              const b = def.buckets!.find((x) => (x.from == null || y >= x.from) && (x.to == null || y <= x.to));
+              if (b && y > 0) add(b.value, n);
+            } else if (def.type === "visitYear") {
+              add(String(raw ?? "").slice(0, 4), n);
+            } else if (Array.isArray(raw)) {
+              // A multi-valued attribute may group by the whole array; count the document under each of its values.
+              for (const v of new Set(raw.map(String))) add(v, n);
+            } else {
+              add(String(raw ?? ""), n);
+            }
+          }
+          values = [...counts.entries()].map(([value, count]) => ({ value, label: valueLabel(def, value, patient), count, selected: selected.includes(value) }));
+          // Bucketed facets keep their natural order; the rest sort by count. Selected values always show.
+          if (def.type === "buckets") values.sort((a, b) => def.buckets!.findIndex((x) => x.value === a.value) - def.buckets!.findIndex((x) => x.value === b.value));
+          else if (def.type === "visitYear") values.sort((a, b) => b.value.localeCompare(a.value));
+          else values.sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+          for (const v of selected) if (!counts.has(v)) values.push({ value: v, label: valueLabel(def, v, patient), count: 0, selected: true });
+        }
+        return { key: def.key, label: def.label, hint: def.hint, values, ms: Math.round(performance.now() - tf) };
+      } catch (e) {
+        if ((e as { status?: number }).status === 404) return { key: def.key, label: def.label, hint: def.hint, values: [], ms: 0 };
+        return { key: def.key, label: def.label, hint: def.hint, values: [], ms: Math.round(performance.now() - tf),
+          error: String((e as Error).message).slice(0, 200) };
+      }
+    });
+
+    const [total, ...facets] = await Promise.all([totalP, ...facetsP]);
+    return { source: kind, namespace, total, scoped: !!gate, facets, ms: Math.round(performance.now() - t0) };
   }));
 }
+
+const withFilters = (f: Filter | null) => (f ? { filters: f } : {});
 
 /**
  * Cache state of a patient's namespace, read from a tiny count query (eventual consistency, so it doesn't wait on object

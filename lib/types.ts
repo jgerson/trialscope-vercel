@@ -2,6 +2,8 @@
 
 export type Kind = "notes" | "pubmed" | "trials";
 export type Mode = "hybrid" | "vector" | "bm25";
+/** Where hybrid results are fused: on turbopuffer (rerank_by ["RRF"]) or in this app's code. */
+export type Fusion = "server" | "app" | "rerank";
 /** A searchable source. "notes" is the selected patient's own namespace; the others are shared corpora. */
 export type Source = "notes" | "pubmed" | "trials";
 
@@ -46,10 +48,18 @@ export interface Hit {
   snippet: string;
   nsRank: number;
   overall: number;
+  /** RRF score that ordered this hit: turbopuffer's ($dist) with server fusion, the app's own otherwise. */
   fused: number;
+  /** With server fusion and verification on: the app's recomputed RRF score for the same document. */
+  appFused: number | null;
+  /** Model rerank only: the reranker's relevance score, and where RRF would have placed this result instead. */
+  rerankScore?: number | null;
+  rrfRank?: number | null;
   rrf: number;
   vector: Signal | null;
   bm25: Signal | null;
+  /** With ranking boosts: this result's keyword score split into relevance and each boost (from compute_attributes). */
+  boost?: HitBoost | null;
   terms: string[];
   raw: Record<string, unknown>;
 }
@@ -66,6 +76,69 @@ export interface NamespaceRun {
   docs: number | null;
   filters: string[];
   request: unknown;
+  /** Hybrid only: who fused, and (server fusion with verification) whether the app's RRF agreed. */
+  fusion?: Fusion;
+  check?: FusionCheck | null;
+  /** Server fusion without the check run inline: the Explain panel fetches it on demand from /api/verify. */
+  verifyLater?: boolean;
+  ranking?: RunRanking | null;
+  rerank?: RunRerank | null;
+  /** How the vector subquery ran: approximate (ANN index) or exact (kNN, every document compared). */
+  vectorSearch?: { method: "ann" | "knn"; error: string | null } | null;
+  /** turbopuffer-side diversification: at most `per` results per value of `attribute`, per subquery. */
+  diversify?: { attribute: string; per: number } | null;
+}
+
+/** ANN accuracy for one namespace, from turbopuffer's recall endpoint plus a timed ANN vs exact comparison. */
+export interface Accuracy {
+  namespace: string;
+  topK: number;
+  thisQuery: { recall: number; annCount: number; exhaustiveCount: number } | { error: string };
+  sampled: { recall: number; searches: number } | { error: string };
+  timing: { annServerMs: number | null; knnServerMs: number | null; annRoundMs: number; knnRoundMs: number; overlap: number;
+    onlyExact: string[]; onlyAnn: string[] } | { error: string };
+}
+
+/** What model reranking did on one namespace. */
+export interface RunRerank {
+  model: string;
+  candidates: number; // per subquery, sent to the model
+  changedTop: number; // positions in the shown results where the reranker's pick differs from RRF's
+  avgShift: number; // mean |RRF rank − reranked rank| over the shown results
+  retrievalServerMs: number | null; // server time of the same subqueries without the model
+  error: string | null; // set when reranking failed and the search fell back to turbopuffer RRF
+}
+
+export interface HitBoost {
+  relevance: number; // Saturate(BM25), 0..1
+  parts: { key: string; label: string; weight: number; raw: number; value: number }[]; // value = raw × weight
+  total: number; // relevance + Σ value: the keyword subquery's score
+}
+
+/** What the ranking boosts did on one namespace. */
+export interface RunRanking {
+  applied: string[];
+  skipped: string[];
+  breakdown: boolean; // per-result breakdown available
+  bm25Midpoint: number;
+  error: string | null; // set when turbopuffer rejected part of the boost request and the search stepped down
+}
+
+/** On-demand check for one namespace: per-result vector/BM25 ranks and the app's RRF, plus the comparison. */
+export interface Verification {
+  check: FusionCheck;
+  signals: Record<string, { vector: Signal | null; bm25: Signal | null; appFused: number }>;
+}
+
+/** Server-side RRF compared with the app's own RRF over the same two unfused lists. */
+export interface FusionCheck {
+  compared: number; // positions compared (the shorter of the two lists)
+  sameIds: number; // positions where both put the same document
+  tieSwaps: number; // positions that differ only because two documents have equal scores
+  maxScoreDiff: number; // largest |server − app| score for documents in both
+  firstMismatch: { position: number; server: string; app: string } | null; // first difference not explained by a tie
+  verifyMs: number; // round trip of the extra unfused request
+  matches: boolean;
 }
 
 export interface SearchFilters {
@@ -78,6 +151,8 @@ export interface SearchFilters {
   noteTypes?: string[];
   visitFrom?: string; // YYYY-MM-DD
   visitTo?: string;
+  /** Faceted refinements ticked after searching (see lib/facets.ts). */
+  refine?: import("./facets").Refine;
 }
 
 /** One corpus: exact rows from an aggregate Count query, stored size from namespace metadata. */
@@ -101,6 +176,10 @@ export interface Facet {
 export interface SearchResponse {
   query: string;
   mode: Mode;
+  fusion: Fusion;
+  ranking: import("./ranking").Ranking | null;
+  diversify: import("./grouping").Diversify | null;
+  vectorExact: boolean;
   topK: number;
   rrfK: number;
   wallMs: number;

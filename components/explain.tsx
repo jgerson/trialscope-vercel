@@ -2,13 +2,51 @@
 // The right-hand panel: how the search ran, or why one result ranked where it did.
 import { useEffect, useState } from "react";
 import { ArrowUpRight, X } from "lucide-react";
-import type { Hit, NamespaceRun, SearchResponse } from "@/lib/types";
+import type { Accuracy, FusionCheck, Hit, NamespaceRun, SearchResponse, Verification } from "@/lib/types";
 import { cx, SourceTag } from "./ui";
+
+// ---------------------------------------------------------------- deferred RRF verification (FUSION_VERIFY=lazy)
+
+// One request per (search, namespace), shared by the overview badge and every result's Explain panel.
+const verifications = new Map<string, Promise<Verification>>();
+
+function verificationFor(data: SearchResponse, run: NamespaceRun): Promise<Verification> {
+  const key = `${data.query}|${run.namespace}|${JSON.stringify(run.request)}`;
+  let p = verifications.get(key);
+  if (!p) {
+    const hits = data.hits.filter((h) => h.namespace === run.namespace).sort((a, b) => a.nsRank - b.nsRank)
+      .map((h) => ({ id: h.id, score: h.fused }));
+    p = fetch("/api/verify", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ namespace: run.namespace, request: run.request, hits }) })
+      .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j as Verification; });
+    p.catch(() => verifications.delete(key)); // let a failed check be retried
+    verifications.set(key, p);
+  }
+  return p;
+}
+
+/** The check for one namespace: inline when the search already ran it, otherwise fetched on demand. */
+function useVerification(data: SearchResponse, run: NamespaceRun | undefined, auto: boolean) {
+  const [state, setState] = useState<{ v: Verification | null; loading: boolean; error: boolean }>({ v: null, loading: false, error: false });
+  const lazy = !!run?.verifyLater && !run.check;
+  const load = () => {
+    if (!run || !lazy) return;
+    setState((s) => ({ ...s, loading: true, error: false }));
+    verificationFor(data, run).then((v) => setState({ v, loading: false, error: false }), () => setState({ v: null, loading: false, error: true }));
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setState({ v: null, loading: false, error: false }); if (auto && lazy) load(); }, [data, run?.namespace, auto]);
+  return { ...state, lazy, load };
+}
 
 export function RunOverview({ data }: { data: SearchResponse }) {
   const n = data.runs.length;
   const how = {
-    hybrid: "Each request runs a vector search and a BM25 keyword search together in one multi_query, then fuses the two lists.",
+    hybrid: data.fusion === "rerank"
+      ? "Each request runs a vector search and a BM25 keyword search in one multi_query, and turbopuffer has a relevance model read every candidate against your query and reorder them (rerank_by). The two lists also come back unfused, so each result shows where RRF would have put it."
+      : data.fusion === "server"
+      ? "Each request runs a vector search and a BM25 keyword search in one multi_query, and turbopuffer fuses the two lists itself with reciprocal rank fusion (rerank_by [\"RRF\"]). The app recomputes the fusion from the unfused lists to check it."
+      : "Each request runs a vector search and a BM25 keyword search together in one multi_query, then the app fuses the two lists.",
     vector: "Each request is a vector search: turbopuffer embeds the query and walks its nearest-neighbor index.",
     bm25: "Each request is a BM25 keyword search over the inverted index.",
   }[data.mode];
@@ -21,14 +59,15 @@ export function RunOverview({ data }: { data: SearchResponse }) {
       </div>
       <p className="mt-1 text-[13px] leading-relaxed text-slate">{how}{n > 1 ? " Results from each source are then merged by rank." : ""}</p>
       <div className="mt-4 divide-y divide-line">
-        {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} />)}
+        {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} query={data.query} data={data} />)}
       </div>
       <p className="mt-4 text-[12.5px] text-slate">Select a result to see why it ranked where it did.</p>
     </div>
   );
 }
 
-function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"] }) {
+function RunRow({ run, mode, query, data }: { run: NamespaceRun; mode: SearchResponse["mode"]; query: string; data: SearchResponse }) {
+  const ver = useVerification(data, run, false);
   return (
     <div className="py-3">
       <div className="flex items-baseline gap-2">
@@ -40,6 +79,28 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         {run.hits} hits. Server time includes {run.embeddingMs ?? 0} ms to embed the query; {run.cache ?? "unknown"} cache;{" "}
         {Math.round(run.roundMs)} ms round trip.
       </p>
+      {run.fusion === "server" && (ver.lazy && !ver.v
+        ? (
+          <button type="button" onClick={ver.load} disabled={ver.loading}
+            className="mt-1.5 block text-[12.5px] text-slate underline decoration-dotted underline-offset-2 hover:text-ink disabled:opacity-60">
+            {ver.loading ? "Checking against the app's RRF…" : ver.error ? "Couldn't check. Try again" : "Check turbopuffer's RRF against the app's"}
+          </button>
+        )
+        : <FusionBadge check={ver.v?.check ?? run.check ?? null} />)}
+      {run.ranking && <RankingNote ranking={run.ranking} />}
+      {run.vectorSearch && (
+        <p className={cx("mt-1.5 text-[12.5px]", run.vectorSearch.error ? "text-amber-800" : "text-slate")}>
+          {run.vectorSearch.error ?? (run.vectorSearch.method === "knn"
+            ? "Vector side ran exact (kNN): every document that passed the filters was compared."
+            : "Vector side ran approximate (ANN) on turbopuffer's index.")}
+        </p>
+      )}
+      {run.rerank && <RerankNote rerank={run.rerank} serverMs={run.serverMs} />}
+      {run.diversify && (
+        <p className="mt-1.5 text-[12.5px] text-slate">
+          Diversified: at most {run.diversify.per} per <span className="font-mono">{run.diversify.attribute}</span> in each list (limit.per).
+        </p>
+      )}
       {run.filters.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {run.filters.map((f) => <span key={f} className="rounded-md bg-paper px-2 py-0.5 text-xs text-ink-2">{f}</span>)}
@@ -52,6 +113,112 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         </pre>
       </details>
       {run.request != null && <PlanAndConsistency run={run} mode={mode} />}
+      {run.request != null && mode !== "bm25" && <AnnAccuracy run={run} query={query} />}
+    </div>
+  );
+}
+
+/**
+ * On request: how accurate ANN was for this query. turbopuffer's recall endpoint runs ANN and an exhaustive search
+ * itself (for this query, and for 20 sampled vectors), and the app times the same vector query both ways.
+ */
+function AnnAccuracy({ run, query }: { run: NamespaceRun; query: string }) {
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [out, setOut] = useState<Accuracy | null>(null);
+  const go = async () => {
+    setState("loading");
+    try {
+      const r = await fetch("/api/accuracy", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ namespace: run.namespace, query, request: run.request }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      setOut(j); setState("idle");
+    } catch {
+      setState("error");
+    }
+  };
+  if (!out) {
+    return (
+      <button type="button" onClick={go} disabled={state === "loading"}
+        className="mt-1.5 block text-[12.5px] text-slate underline decoration-dotted underline-offset-2 hover:text-ink disabled:opacity-60">
+        {state === "loading" ? "Comparing ANN with exact search…" : state === "error" ? "Couldn't check. Try again" : "Check ANN accuracy (vs exact)"}
+      </button>
+    );
+  }
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  const failed = (x: object): x is { error: string } => "error" in x;
+  return (
+    <div className="mt-2 space-y-1.5 rounded-lg border border-line p-3 text-[12.5px] leading-relaxed">
+      <p className="font-semibold text-ink">ANN accuracy, top {out.topK}</p>
+      <p className="text-ink-2">
+        This query: {failed(out.thisQuery) ? <span className="text-slate">recall endpoint unavailable ({out.thisQuery.error})</span>
+          : <><b className="tabular-nums">{pct(out.thisQuery.recall)}</b> of the true nearest neighbors found by ANN (turbopuffer recall endpoint)</>}
+      </p>
+      <p className="text-ink-2">
+        Namespace sample: {failed(out.sampled) ? <span className="text-slate">unavailable ({out.sampled.error})</span>
+          : <><b className="tabular-nums">{pct(out.sampled.recall)}</b> average recall over {out.sampled.searches} random searches</>}
+      </p>
+      {failed(out.timing) ? <p className="text-slate">Timing comparison unavailable ({out.timing.error})</p> : (
+        <>
+          <table className="mt-1 w-full">
+            <thead><tr className="text-slate"><th className="text-left font-normal" /><th className="text-right font-normal">server</th><th className="text-right font-normal">round trip</th></tr></thead>
+            <tbody>
+              <tr><td className="text-ink-2">Approximate (ANN)</td><td className="text-right tabular-nums">{out.timing.annServerMs ?? "–"} ms</td><td className="text-right tabular-nums text-slate">{Math.round(out.timing.annRoundMs)} ms</td></tr>
+              <tr><td className="text-ink-2">Exact (kNN)</td><td className="text-right tabular-nums">{out.timing.knnServerMs ?? "–"} ms</td><td className="text-right tabular-nums text-slate">{Math.round(out.timing.knnRoundMs)} ms</td></tr>
+            </tbody>
+          </table>
+          <p className="text-slate">
+            Same top {out.topK} from both: {pct(out.timing.overlap)}.
+            {out.timing.onlyExact.length ? ` Only exact found: ${out.timing.onlyExact.slice(0, 5).join(", ")}${out.timing.onlyExact.length > 5 ? "…" : ""}.` : " ANN missed nothing."}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** How much the reranker changed the order, and what it cost compared with the same retrieval without it. */
+function RerankNote({ rerank, serverMs }: { rerank: NonNullable<NamespaceRun["rerank"]>; serverMs: number | null }) {
+  if (rerank.error) return <p className="mt-1.5 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[12.5px] text-amber-900">{rerank.error}</p>;
+  const extra = serverMs != null && rerank.retrievalServerMs != null ? Math.max(0, serverMs - rerank.retrievalServerMs) : null;
+  return (
+    <div className="mt-1.5 rounded-lg bg-accent-soft/60 px-2.5 py-1.5 text-[12.5px] leading-relaxed text-ink-2">
+      Reranked by <span className="font-mono">{rerank.model}</span> over up to {rerank.candidates} candidates per list. Changed{" "}
+      {rerank.changedTop} of the shown positions versus RRF (average move {rerank.avgShift.toFixed(1)} places)
+      {extra != null ? <>; about {Math.round(extra)} ms of server time on top of retrieval ({rerank.retrievalServerMs} ms).</> : "."}
+    </div>
+  );
+}
+
+/** Which boosts this source's keyword subquery ran with, which didn't apply, and any step-down after a rejection. */
+function RankingNote({ ranking }: { ranking: NonNullable<NamespaceRun["ranking"]> }) {
+  return (
+    <div className="mt-1.5 rounded-lg bg-accent-soft/60 px-2.5 py-1.5 text-[12.5px] leading-relaxed text-ink-2">
+      {ranking.applied.length
+        ? <>Keyword ranking boosted: {ranking.applied.join(", ")} (relevance = Saturate(BM25, midpoint {ranking.bm25Midpoint}), 0–1).</>
+        : <>No boosts applied here.</>}
+      {ranking.skipped.length > 0 && <span className="text-slate"> Skipped: {ranking.skipped.join("; ")}.</span>}
+      {ranking.error && <span className="block text-amber-800">{ranking.error}. {ranking.applied.length ? "Ran without the per-result breakdown." : "Ran as plain BM25."}</span>}
+    </div>
+  );
+}
+
+/** Did turbopuffer's RRF agree with the app's? Shown under each namespace when fusion ran on turbopuffer. */
+function FusionBadge({ check }: { check: FusionCheck | null }) {
+  if (!check) {
+    return <p className="mt-1.5 text-[12.5px] text-slate">Fused on turbopuffer. Verification is off (FUSION_VERIFY=off), so per-list ranks aren&apos;t shown.</p>;
+  }
+  const diff = check.maxScoreDiff < 1e-9 ? "0" : check.maxScoreDiff.toExponential(1);
+  return (
+    <div className={cx("mt-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] leading-relaxed",
+      check.matches ? "bg-emerald-50 text-emerald-900" : "bg-amber-50 text-amber-900")}>
+      {check.matches
+        ? <>✓ turbopuffer&apos;s RRF matches the app&apos;s: {check.sameIds}/{check.compared} positions identical
+          {check.tieSwaps ? `, ${check.tieSwaps} swapped within an exact score tie` : ""}, max score difference {diff}.</>
+        : <>⚠ turbopuffer&apos;s RRF differs from the app&apos;s
+          {check.firstMismatch ? ` at #${check.firstMismatch.position} (turbopuffer ${check.firstMismatch.server}, app ${check.firstMismatch.app})` : ""}
+          ; {check.sameIds}/{check.compared} positions identical, max score difference {diff}.</>}
+      <span className="text-slate"> Check request: {Math.round(check.verifyMs)} ms.</span>
     </div>
   );
 }
@@ -162,10 +329,14 @@ function Signal({ title, sig, topK, children }: { title: string; sig: Hit["vecto
   );
 }
 
-export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search overview" }:
+export function HitExplainer({ hit: shown, data, onClose, closeLabel = "Back to search overview" }:
   { hit: Hit; data: SearchResponse; onClose: () => void; closeLabel?: string }) {
   const k = data.rrfK;
-  const run = data.runs.find((r) => r.namespace === hit.namespace)!;
+  const run = data.runs.find((r) => r.namespace === shown.namespace)!;
+  // With deferred verification, the per-list ranks arrive when this panel opens; merge them into the hit.
+  const ver = useVerification(data, run, true);
+  const sig = ver.v?.signals[shown.id];
+  const hit: Hit = sig ? { ...shown, vector: sig.vector, bm25: sig.bm25, appFused: sig.appFused } : shown;
   const multi = data.runs.length > 1;
   return (
     <div key={hit.key} className="animate-slide-in p-5">
@@ -204,16 +375,77 @@ export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search 
         )}
       </div>
 
+      {hit.boost && (
+        <>
+          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">Keyword score with boosts</h4>
+          <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
+            <div>relevance (BM25 → 0–1)&nbsp;&nbsp;{hit.boost.relevance.toFixed(3)}</div>
+            {hit.boost.parts.map((p) => (
+              <div key={p.key} className={p.value ? "" : "text-slate"}>
+                + {p.label.toLowerCase()}&nbsp;&nbsp;{p.raw.toFixed(2)} × {p.weight} = {p.value.toFixed(3)}
+              </div>
+            ))}
+            <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">
+              keyword score = {hit.boost.total.toFixed(3)}{hit.bm25 ? ` → #${hit.bm25.rank} in the keyword list` : ""}
+            </div>
+          </div>
+          <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate">
+            Each part was computed by turbopuffer (compute_attributes) with the same expressions used to rank. Boosts add to the
+            keyword score only; {data.mode === "hybrid" ? "the vector rank is unchanged, and RRF fuses the boosted keyword rank with it below." : "this is the score the results are sorted by."}
+          </p>
+        </>
+      )}
+
+      {hit.rerankScore != null && (
+        <>
+          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">Model rerank</h4>
+          <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
+            <div>model score&nbsp;&nbsp;{hit.rerankScore.toFixed(4)}</div>
+            <div>RRF would rank&nbsp;&nbsp;{hit.rrfRank != null ? `#${hit.rrfRank}` : "outside the candidates"}{hit.appFused != null ? ` (RRF ${hit.appFused.toFixed(4)})` : ""}</div>
+            <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">
+              reranked → #{hit.nsRank} in {run.short}
+              {hit.rrfRank != null && hit.rrfRank !== hit.nsRank ? (hit.rrfRank > hit.nsRank ? ` (▲${hit.rrfRank - hit.nsRank})` : ` (▼${hit.nsRank - hit.rrfRank})`) : " (same as RRF)"}
+            </div>
+          </div>
+          <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate">
+            The model read this document&apos;s text together with your query and scored the match directly; the vector and keyword
+            ranks below only decided whether it made the candidate list. The RRF lines show what plain fusion would have done.
+          </p>
+        </>
+      )}
+
       {data.mode === "hybrid" && (
         <>
-          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">How the two rankings were combined</h4>
+          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">{data.fusion === "rerank" ? "What RRF would have done" : "How the two rankings were combined"}</h4>
+          {ver.loading && <p className="mb-2 text-[12.5px] text-slate">Fetching this result&apos;s vector and keyword ranks…</p>}
+          {ver.error && <p className="mb-2 text-[12.5px] text-amber-800">Couldn&apos;t fetch the per-list ranks for this result.</p>}
           <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
             {hit.vector && <div>vector&nbsp;&nbsp;1/({k}+{hit.vector.rank}) = {(1 / (k + hit.vector.rank)).toFixed(4)}</div>}
             {hit.bm25 && <div>bm25&nbsp;&nbsp;&nbsp;&nbsp;1/({k}+{hit.bm25.rank}) = {(1 / (k + hit.bm25.rank)).toFixed(4)}</div>}
-            <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">fused = {hit.fused.toFixed(4)} → #{hit.nsRank} in {run.short}</div>
+            {data.fusion === "server" ? (
+              <>
+                {hit.appFused != null && <div className="mt-1 border-t border-line pt-1">app&apos;s RRF&nbsp;&nbsp;= {hit.appFused.toFixed(4)}</div>}
+                <div className={cx("font-semibold text-ink", hit.appFused == null && "mt-1 border-t border-line pt-1")}>
+                  turbopuffer = {hit.fused.toFixed(4)} → #{hit.nsRank} in {run.short}
+                  {hit.appFused != null && (Math.abs(hit.appFused - hit.fused) < 1e-6 ? " ✓" : " ≠")}
+                </div>
+              </>
+            ) : data.fusion === "rerank" ? (
+              <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">
+                RRF = {hit.appFused != null ? hit.appFused.toFixed(4) : "–"} → would be #{hit.rrfRank ?? "–"} (reranked to #{hit.nsRank})
+              </div>
+            ) : (
+              <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">fused = {hit.fused.toFixed(4)} → #{hit.nsRank} in {run.short}</div>
+            )}
           </div>
           <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate">
             Reciprocal rank fusion adds 1/({k} + rank) from each list, so showing up in both lists beats a high rank in one.
+            {data.fusion === "server"
+              ? (hit.appFused != null
+                ? " turbopuffer computed this result's score and position (rerank_by [\"RRF\"], returned in $dist); the lines above are the app's own arithmetic over the unfused lists, as a check."
+                : " turbopuffer computed this result's score and position; with verification off there are no per-list ranks to show.")
+              : data.fusion === "rerank" ? " Shown for comparison only: the reranker's score set the order."
+              : " The app did this arithmetic itself, from the two lists turbopuffer returned."}
           </p>
         </>
       )}
