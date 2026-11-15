@@ -8,7 +8,9 @@ import { cx, SourceTag } from "./ui";
 export function RunOverview({ data }: { data: SearchResponse }) {
   const n = data.runs.length;
   const how = {
-    hybrid: data.fusion === "server"
+    hybrid: data.fusion === "rerank"
+      ? "Each request runs a vector search and a BM25 keyword search in one multi_query, and turbopuffer has a relevance model read every candidate against your query and reorder them (rerank_by). The two lists also come back unfused, so each result shows where RRF would have put it."
+      : data.fusion === "server"
       ? "Each request runs a vector search and a BM25 keyword search in one multi_query, and turbopuffer fuses the two lists itself with reciprocal rank fusion (rerank_by [\"RRF\"]). The app recomputes the fusion from the unfused lists to check it."
       : "Each request runs a vector search and a BM25 keyword search together in one multi_query, then the app fuses the two lists.",
     vector: "Each request is a vector search: turbopuffer embeds the query and walks its nearest-neighbor index.",
@@ -44,6 +46,12 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
       </p>
       {run.fusion === "server" && <FusionBadge check={run.check ?? null} />}
       {run.ranking && <RankingNote ranking={run.ranking} />}
+      {run.rerank && <RerankNote rerank={run.rerank} serverMs={run.serverMs} />}
+      {run.diversify && (
+        <p className="mt-1.5 text-[12.5px] text-slate">
+          Diversified: at most {run.diversify.per} per <span className="font-mono">{run.diversify.attribute}</span> in each list (limit.per).
+        </p>
+      )}
       {run.filters.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {run.filters.map((f) => <span key={f} className="rounded-md bg-paper px-2 py-0.5 text-xs text-ink-2">{f}</span>)}
@@ -56,6 +64,19 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         </pre>
       </details>
       {run.request != null && <PlanAndConsistency run={run} mode={mode} />}
+    </div>
+  );
+}
+
+/** How much the reranker changed the order, and what it cost compared with the same retrieval without it. */
+function RerankNote({ rerank, serverMs }: { rerank: NonNullable<NamespaceRun["rerank"]>; serverMs: number | null }) {
+  if (rerank.error) return <p className="mt-1.5 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[12.5px] text-amber-900">{rerank.error}</p>;
+  const extra = serverMs != null && rerank.retrievalServerMs != null ? Math.max(0, serverMs - rerank.retrievalServerMs) : null;
+  return (
+    <div className="mt-1.5 rounded-lg bg-accent-soft/60 px-2.5 py-1.5 text-[12.5px] leading-relaxed text-ink-2">
+      Reranked by <span className="font-mono">{rerank.model}</span> over up to {rerank.candidates} candidates per list. Changed{" "}
+      {rerank.changedTop} of the shown positions versus RRF (average move {rerank.avgShift.toFixed(1)} places)
+      {extra != null ? <>; about {Math.round(extra)} ms of server time on top of retrieval ({rerank.retrievalServerMs} ms).</> : "."}
     </div>
   );
 }
@@ -262,9 +283,27 @@ export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search 
         </>
       )}
 
+      {hit.rerankScore != null && (
+        <>
+          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">Model rerank</h4>
+          <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
+            <div>model score&nbsp;&nbsp;{hit.rerankScore.toFixed(4)}</div>
+            <div>RRF would rank&nbsp;&nbsp;{hit.rrfRank != null ? `#${hit.rrfRank}` : "outside the candidates"}{hit.appFused != null ? ` (RRF ${hit.appFused.toFixed(4)})` : ""}</div>
+            <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">
+              reranked → #{hit.nsRank} in {run.short}
+              {hit.rrfRank != null && hit.rrfRank !== hit.nsRank ? (hit.rrfRank > hit.nsRank ? ` (▲${hit.rrfRank - hit.nsRank})` : ` (▼${hit.nsRank - hit.rrfRank})`) : " (same as RRF)"}
+            </div>
+          </div>
+          <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate">
+            The model read this document&apos;s text together with your query and scored the match directly; the vector and keyword
+            ranks below only decided whether it made the candidate list. The RRF lines show what plain fusion would have done.
+          </p>
+        </>
+      )}
+
       {data.mode === "hybrid" && (
         <>
-          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">How the two rankings were combined</h4>
+          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">{data.fusion === "rerank" ? "What RRF would have done" : "How the two rankings were combined"}</h4>
           <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
             {hit.vector && <div>vector&nbsp;&nbsp;1/({k}+{hit.vector.rank}) = {(1 / (k + hit.vector.rank)).toFixed(4)}</div>}
             {hit.bm25 && <div>bm25&nbsp;&nbsp;&nbsp;&nbsp;1/({k}+{hit.bm25.rank}) = {(1 / (k + hit.bm25.rank)).toFixed(4)}</div>}
@@ -276,6 +315,10 @@ export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search 
                   {hit.appFused != null && (Math.abs(hit.appFused - hit.fused) < 1e-6 ? " ✓" : " ≠")}
                 </div>
               </>
+            ) : data.fusion === "rerank" ? (
+              <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">
+                RRF = {hit.appFused != null ? hit.appFused.toFixed(4) : "–"} → would be #{hit.rrfRank ?? "–"} (reranked to #{hit.nsRank})
+              </div>
             ) : (
               <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">fused = {hit.fused.toFixed(4)} → #{hit.nsRank} in {run.short}</div>
             )}
@@ -286,6 +329,7 @@ export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search 
               ? (hit.appFused != null
                 ? " turbopuffer computed this result's score and position (rerank_by [\"RRF\"], returned in $dist); the lines above are the app's own arithmetic over the unfused lists, as a check."
                 : " turbopuffer computed this result's score and position; with verification off there are no per-list ranks to show.")
+              : data.fusion === "rerank" ? " Shown for comparison only: the reranker's score set the order."
               : " The app did this arithmetic itself, from the two lists turbopuffer returned."}
           </p>
         </>

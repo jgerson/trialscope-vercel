@@ -7,6 +7,7 @@ import type { CorpusStat, Facet, Fusion, Hit, Mode, Patient, SearchFilters, Sear
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
 import { HitExplainer, RunOverview } from "./explain";
+import { DIVERSIFIABLE, GROUPS, groupHits, parseDiversify, type GroupKey } from "@/lib/grouping";
 import { BOOSTS, DEFAULT_MIDPOINT, DEFAULT_SPAN, isActive, rankingFromParam, rankingToParam, STRENGTH_LABEL,
   STRENGTH_WEIGHT, type Ranking, type Strength } from "@/lib/ranking";
 import { cx, highlight, Segmented, SourceTag, Tip } from "./ui";
@@ -27,7 +28,9 @@ const MODES: { value: Mode; label: string; hint: string }[] = [
 const FUSIONS: { value: Fusion; label: string; hint: string }[] = [
   { value: "server", label: "turbopuffer", hint: "turbopuffer fuses the two lists itself (rerank_by [\"RRF\"]) and returns one ranked list. The app also recomputes RRF from the unfused lists to check they agree and to explain each result." },
   { value: "app", label: "In app", hint: "turbopuffer returns the vector and BM25 lists separately and this app fuses them with the same RRF formula (k = 60)." },
+  { value: "rerank", label: "Model rerank", hint: "turbopuffer pools both lists' candidates and a relevance model reads each one against your query (rerank_by). Slower and paid per token, better at nuance like 'after osimertinib'. Each result shows where RRF would have put it." },
 ];
+const CANDIDATES = [20, 30, 40];
 
 type Area = "notes" | "literature";
 
@@ -53,7 +56,16 @@ export function SearchView() {
   const [input, setInput] = useState(params.get("q") ?? "");
   const [{ area, lit }, setSources] = useState(() => initialSources(params));
   const [mode, setMode] = useState<Mode>((params.get("mode") as Mode) || "hybrid");
-  const [fusion, setFusion] = useState<Fusion>(params.get("fusion") === "app" ? "app" : "server");
+  const [fusion, setFusion] = useState<Fusion>(
+    params.get("fusion") === "app" ? "app" : params.get("fusion") === "rerank" ? "rerank" : "server");
+  const [candidates, setCandidates] = useState<number>(CANDIDATES.includes(Number(params.get("cand"))) ? Number(params.get("cand")) : 30);
+  // Display grouping (browser only) and turbopuffer-side diversification (?div=org-2: at most 2 per sponsor/journal).
+  const [groupBy, setGroupBy] = useState<GroupKey | "">((GROUPS.find((g) => g.key === params.get("group"))?.key) ?? "");
+  const [diversify, setDiversify] = useState(() => {
+    const [by, per] = (params.get("div") ?? "").split("-");
+    return parseDiversify({ by, per });
+  });
+  const divKey = diversify ? `${diversify.by}-${diversify.per}` : "";
   // Optional boosts and recency (all off by default), kept in the URL as ?rk=… so a link reproduces the ranking.
   const [ranking, setRanking] = useState<Ranking>(() => rankingFromParam(params.get("rk")));
   const rankingKey = rankingToParam(ranking);
@@ -75,6 +87,7 @@ export function SearchView() {
       const res = await fetch("/api/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, fusion, ranking: rankingFromParam(rankingKey),
+          diversify: divKey ? { by: divKey.split("-")[0], per: Number(divKey.split("-")[1]) } : null, candidates,
           filters, topK, patientId: patient?.id }),
       });
       const json = await res.json();
@@ -85,7 +98,7 @@ export function SearchView() {
     } finally {
       setLoading(false);
     }
-  }, [sourcesKey, mode, fusion, rankingKey, filters, topK, patient?.id]);
+  }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, filters, topK, patient?.id]);
 
   // Re-run whenever the query in the URL or any control changes.
   useEffect(() => { setInput(q); run(q); }, [q, run]);
@@ -108,6 +121,9 @@ export function SearchView() {
     if (mode !== "hybrid") sp.set("mode", mode);
     else if (fusion === "app") sp.set("fusion", "app");
     if (rankingKey) sp.set("rk", rankingKey);
+    if (mode === "hybrid" && fusion === "rerank") { sp.set("fusion", "rerank"); if (candidates !== 30) sp.set("cand", String(candidates)); }
+    if (divKey) sp.set("div", divKey);
+    if (groupBy) sp.set("group", groupBy);
     router.replace(`/?${sp.toString()}`, { scroll: false });
     // The search re-runs when the query in the URL changes. Searching the same words again (say, after switching from
     // hybrid to vector) leaves the query unchanged, so run it directly.
@@ -182,9 +198,18 @@ export function SearchView() {
             <div className="inline-flex items-center gap-2">
               <span className="text-[12.5px] text-slate">Fused by</span>
               <Segmented label="Fusion" value={fusion} options={FUSIONS} onChange={setFusion} />
+              {fusion === "rerank" && (
+                <Tip text="Candidates per list sent to the model. More can surface better matches, but each one is a model read (latency and cost).">
+                  <select aria-label="Rerank candidates" value={candidates} onChange={(e) => setCandidates(Number(e.target.value))}
+                    className="rounded-lg border border-line bg-surface px-2 py-1.5 text-[13px] text-ink-2">
+                    {CANDIDATES.map((n) => <option key={n} value={n}>{n} candidates</option>)}
+                  </select>
+                </Tip>
+              )}
             </div>
           )}
-          <RankingButton ranking={ranking} setRanking={setRanking} mode={mode} sources={sources} patient={patient} />
+          <RankingButton ranking={ranking} setRanking={setRanking} mode={mode} sources={sources} patient={patient}
+            rerank={mode === "hybrid" && fusion === "rerank"} />
           <FiltersButton filters={filters} setFilters={setFilters} topK={topK} setTopK={setTopK} active={activeFilters}
             sources={sources} patient={patient} />
         </div>
@@ -224,16 +249,34 @@ export function SearchView() {
             <div className="flex items-baseline gap-3">
               <h2 className="font-display text-[32px] leading-none tracking-tight">{data ? `${data.hits.length} results` : "Searching"}</h2>
               {data && <span className="text-[13.5px] text-slate">
-                {MODES.find((m) => m.value === data.mode)?.label}{data.mode === "hybrid" ? ` (fused ${data.fusion === "server" ? "on turbopuffer" : "in app"})` : ""} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
+                {MODES.find((m) => m.value === data.mode)?.label}{data.mode === "hybrid" ? ` (${data.fusion === "rerank" ? "model reranked" : `fused ${data.fusion === "server" ? "on turbopuffer" : "in app"}`})` : ""} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
               </span>}
             </div>
             <div className={cx("mt-4 space-y-2.5 transition-opacity", loading && data && "opacity-50")}>
               {!data && loading && Array.from({ length: 4 }, (_, i) => <SkeletonCard key={i} />)}
               {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try fewer filters or different sources.</p>}
-              {data?.hits.map((h) => (
-                <ResultCard key={h.key} hit={h} terms={data.hits.length ? queryWords(data.query) : []}
-                  selected={h.key === selected} onSelect={() => setSelected(h.key === selected ? null : h.key)} />
-              ))}
+              {data && data.hits.length > 0 && (
+                <GroupControls groupBy={groupBy} setGroupBy={setGroupBy} diversify={diversify} setDiversify={setDiversify}
+                  sources={sources} />
+              )}
+              {data && (groupBy
+                ? groupHits(data.hits, groupBy).map((g) => (
+                  <section key={g.name} aria-label={g.name} className="pt-2">
+                    <h3 className="mb-1.5 flex items-baseline gap-2 text-[13.5px] font-semibold text-ink">
+                      {g.name}<span className="text-[12.5px] font-normal text-slate">{g.hits.length} result{g.hits.length > 1 ? "s" : ""} · best #{g.best}</span>
+                    </h3>
+                    <div className="space-y-2.5">
+                      {g.hits.map((h) => (
+                        <ResultCard key={h.key} hit={h} terms={queryWords(data.query)}
+                          selected={h.key === selected} onSelect={() => setSelected(h.key === selected ? null : h.key)} />
+                      ))}
+                    </div>
+                  </section>
+                ))
+                : data.hits.map((h) => (
+                  <ResultCard key={h.key} hit={h} terms={data.hits.length ? queryWords(data.query) : []}
+                    selected={h.key === selected} onSelect={() => setSelected(h.key === selected ? null : h.key)} />
+                )))}
             </div>
           </section>
 
@@ -335,6 +378,42 @@ function queryWords(q: string) {
     !["after", "before", "with", "from", "that", "this", "what", "does", "about", "patient", "patients"].includes(w));
 }
 
+/** Group the shown results (display only), and ask turbopuffer to cap results per sponsor/journal/status/year. */
+function GroupControls({ groupBy, setGroupBy, diversify, setDiversify, sources }: {
+  groupBy: GroupKey | ""; setGroupBy: (g: GroupKey | "") => void;
+  diversify: ReturnType<typeof parseDiversify>; setDiversify: (d: ReturnType<typeof parseDiversify>) => void; sources: Source[];
+}) {
+  const kinds = sources.map((s) => s) as ("notes" | "pubmed" | "trials")[];
+  const meaning = (g: (typeof GROUPS)[number]) => [...new Set(kinds.map((k) => g.perKind[k]))].join(" / ");
+  const select = "rounded-lg border border-line bg-surface px-2 py-1 text-[13px] text-ink-2";
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pb-1 text-[13px] text-slate">
+      <label className="inline-flex items-center gap-2">
+        Group by
+        <select className={select} value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupKey | "")}>
+          <option value="">None</option>
+          {GROUPS.map((g) => <option key={g.key} value={g.key}>{g.key === "source" ? "Source" : `${g.label} (${meaning(g)})`}</option>)}
+        </select>
+      </label>
+      <Tip text="Asks turbopuffer to return at most this many results per value (limit.per on each subquery), so one sponsor or journal can't fill the page. Applied before fusion or reranking.">
+        <label className="inline-flex items-center gap-2">
+          At most
+          <select className={select} value={diversify?.per ?? 0}
+            onChange={(e) => { const per = Number(e.target.value); setDiversify(per ? { by: diversify?.by ?? "org", per } : null); }}>
+            <option value={0}>any number</option>
+            {[1, 2, 3].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+          per
+          <select className={select} value={diversify?.by ?? "org"} disabled={!diversify}
+            onChange={(e) => setDiversify({ by: e.target.value as GroupKey, per: diversify?.per ?? 2 })}>
+            {DIVERSIFIABLE.map((g) => <option key={g.key} value={g.key}>{meaning(g) || g.label}</option>)}
+          </select>
+        </label>
+      </Tip>
+    </div>
+  );
+}
+
 function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: string[]; selected: boolean; onSelect: () => void }) {
   return (
     <article tabIndex={0} onClick={onSelect}
@@ -345,7 +424,19 @@ function ResultCard({ hit, terms, selected, onSelect }: { hit: Hit; terms: strin
         <SourceTag kind={hit.kind} />
         {hit.code && <span className="font-mono text-[12px] text-ink-2">{hit.code}</span>}
         {hit.meta.map((m) => <span key={m}>{m}</span>)}
-        <span className="ml-auto tabular-nums">#{hit.overall}</span>
+        {hit.rrfRank != null && hit.rrfRank !== hit.nsRank && (
+          <Tip text={`The reranker moved this from #${hit.rrfRank} (RRF) to #${hit.nsRank}.`}>
+            <span className={cx("ml-auto tabular-nums font-semibold", hit.rrfRank > hit.nsRank ? "text-trials" : "text-slate")}>
+              {hit.rrfRank > hit.nsRank ? `▲${hit.rrfRank - hit.nsRank}` : `▼${hit.nsRank - hit.rrfRank}`}
+            </span>
+          </Tip>
+        )}
+        {hit.rrfRank === null && hit.rerankScore != null && (
+          <Tip text="Not in RRF's top results: the reranker pulled it up from deeper in the candidates.">
+            <span className="ml-auto font-semibold text-trials">new</span>
+          </Tip>
+        )}
+        <span className={cx("tabular-nums", hit.rerankScore == null || hit.rrfRank === hit.nsRank ? "ml-auto" : "")}>#{hit.overall}</span>
       </div>
       <h3 className="mt-2 text-[16.5px] font-semibold leading-snug tracking-[-0.01em] text-ink">{highlight(hit.title, terms)}</h3>
       <p className="mt-1.5 max-w-[82ch] text-[14px] leading-relaxed text-ink-2">{highlight(hit.snippet, terms)}</p>
@@ -386,8 +477,8 @@ function SkeletonCard() {
  * Soft ranking: boosts and recency added to the keyword (BM25) side. Unlike filters they never remove a result. Each
  * control is off by default; turning one on re-runs the search. Vector-only search has no keyword side to boost.
  */
-function RankingButton({ ranking, setRanking, mode, sources, patient }: {
-  ranking: Ranking; setRanking: (r: Ranking) => void; mode: Mode; sources: Source[]; patient: Patient | null;
+function RankingButton({ ranking, setRanking, mode, sources, patient, rerank }: {
+  ranking: Ranking; setRanking: (r: Ranking) => void; mode: Mode; sources: Source[]; patient: Patient | null; rerank: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -398,7 +489,7 @@ function RankingButton({ ranking, setRanking, mode, sources, patient }: {
     document.addEventListener("mousedown", close); document.addEventListener("keydown", esc);
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc); };
   }, [open]);
-  const vectorOnly = mode === "vector";
+  const vectorOnly = mode === "vector" || rerank;
   const kinds = sources.map((s) => (s === "notes" ? "notes" : s)) as ("notes" | "pubmed" | "trials")[];
   const on = BOOSTS.filter((b) => (ranking[b.key] ?? 0) > 0);
   const relevant = on.filter((b) => b.kinds.some((k) => kinds.includes(k)));
@@ -407,7 +498,7 @@ function RankingButton({ ranking, setRanking, mode, sources, patient }: {
 
   return (
     <div ref={ref} className="relative">
-      <Tip text={vectorOnly ? "Boosts apply to keyword ranking, so they're off in vector-only search." : "Boost recruiting, recent or higher-evidence results without filtering anything out."}>
+      <Tip text={rerank ? "The model reranker rescores every candidate, so boosts are off while Model rerank is selected." : vectorOnly ? "Boosts apply to keyword ranking, so they're off in vector-only search." : "Boost recruiting, recent or higher-evidence results without filtering anything out."}>
         <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} disabled={vectorOnly}
           className={cx("inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[13px] font-medium disabled:opacity-50",
             relevant.length && !vectorOnly ? "border-accent bg-accent-soft text-accent-strong" : "border-line bg-surface text-ink-2 hover:border-line-2")}>

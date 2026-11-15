@@ -3,7 +3,7 @@
 export type Kind = "notes" | "pubmed" | "trials";
 export type Mode = "hybrid" | "vector" | "bm25";
 /** Where hybrid results are fused: on turbopuffer (rerank_by ["RRF"]) or in this app's code. */
-export type Fusion = "server" | "app";
+export type Fusion = "server" | "app" | "rerank";
 /** A searchable source. "notes" is the selected patient's own namespace; the others are shared corpora. */
 export type Source = "notes" | "pubmed" | "trials";
 
@@ -52,6 +52,9 @@ export interface Hit {
   fused: number;
   /** With server fusion and verification on: the app's recomputed RRF score for the same document. */
   appFused: number | null;
+  /** Model rerank only: the reranker's relevance score, and where RRF would have placed this result instead. */
+  rerankScore?: number | null;
+  rrfRank?: number | null;
   rrf: number;
   vector: Signal | null;
   bm25: Signal | null;
@@ -77,6 +80,19 @@ export interface NamespaceRun {
   fusion?: Fusion;
   check?: FusionCheck | null;
   ranking?: RunRanking | null;
+  rerank?: RunRerank | null;
+  /** turbopuffer-side diversification: at most `per` results per value of `attribute`, per subquery. */
+  diversify?: { attribute: string; per: number } | null;
+}
+
+/** What model reranking did on one namespace. */
+export interface RunRerank {
+  model: string;
+  candidates: number; // per subquery, sent to the model
+  changedTop: number; // positions in the shown results where the reranker's pick differs from RRF's
+  avgShift: number; // mean |RRF rank − reranked rank| over the shown results
+  retrievalServerMs: number | null; // server time of the same subqueries without the model
+  error: string | null; // set when reranking failed and the search fell back to turbopuffer RRF
 }
 
 export interface HitBoost {
@@ -140,6 +156,7 @@ export interface SearchResponse {
   mode: Mode;
   fusion: Fusion;
   ranking: import("./ranking").Ranking | null;
+  diversify: import("./grouping").Diversify | null;
   topK: number;
   rrfK: number;
   wallMs: number;

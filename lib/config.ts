@@ -21,6 +21,9 @@ export const config = {
   // is what powers the per-list ranks in the Explain panel. FUSION_VERIFY=false skips it.
   // Ranking boosts map BM25 into 0..1 with Saturate; this is the BM25 score that becomes 0.5 (see lib/ranking.ts).
   bm25Midpoint: Number(process.env.BOOST_BM25_MIDPOINT) > 0 ? Number(process.env.BOOST_BM25_MIDPOINT) : 6,
+  // Model reranking (Fused by → Model rerank): turbopuffer's rerank_by with this model over the `text` attribute.
+  rerankModel: process.env.RERANK_MODEL || "zeroentropy/zerank-2",
+  rerankCandidates: Math.min(100, Math.max(10, Number(process.env.RERANK_CANDIDATES) || 30)),
   fusionVerify: !["0", "false", "no"].includes((process.env.FUSION_VERIFY ?? "").toLowerCase()),
 };
 

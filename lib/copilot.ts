@@ -6,6 +6,7 @@ import { config, NS } from "./config";
 import { tracedFetch } from "./traced-fetch";
 import { buildFilters, listNotes, search } from "./tpuf";
 import { describeRanking, isActive, parseRanking } from "./ranking";
+import { parseDiversify } from "./grouping";
 import { getActiveTraceId, startActiveObservation, startObservation, updateActiveObservation } from "@langfuse/tracing";
 import { assistantMessage, promptOf, usageOf } from "./langfuse";
 import { costOf, priceOf } from "./pricing";
@@ -34,6 +35,16 @@ const TOOLS: Anthropic.Tool[] = [
         country: { type: "string", description: "e.g. 'United States'" },
         match_patient_age_sex: { type: "boolean" },
         pubmed_year_from: { type: "integer" },
+        rerank: {
+          type: "boolean",
+          description:
+            "Rerank the hybrid candidates with a relevance model that reads each document against the query. Slower and " +
+            "costlier, much better at nuance: 'after X', exclusions, eligibility conditions. Ignores ranking boosts.",
+        },
+        max_per_source_group: {
+          type: "integer", minimum: 1, maximum: 5,
+          description: "Diversify: at most this many results per trial sponsor / PubMed journal, so one doesn't dominate.",
+        },
         ranking: {
           type: "object",
           description:
@@ -71,6 +82,8 @@ never the patient. Don't exclude or question a note because of who wrote it.
 - Ground every claim in tool results and cite it with the tag shown in the result, like [N2], [P1] or [T3].
 - For trial matching, first read the patient's notes, extract diagnosis, stage, biomarkers, age, sex and location, then \
 search trials with filters (usually status Recruiting or Not yet recruiting, the patient's country, and match_patient_age_sex).
+- Set rerank=true for nuanced trial-eligibility or treatment-sequence questions; leave it off for simple lookups (drug \
+names, NCT ids). Use max_per_source_group when results look dominated by one sponsor or journal.
 - Ranking boosts (the search tool's "ranking" field) reorder results without removing any. Prefer them over hard filters \
 when the user expresses a preference ("recent", "strong evidence", "late-phase") rather than a requirement.
 - Say plainly that eligibility needs physician review against the full protocol. Do not give treatment advice.
@@ -259,11 +272,15 @@ async function copilotLoop(
       recruiting: rk.recruiting, recent: rk.recent, recentMidpoint: rk.recent_midpoint_year, evidence: rk.evidence,
       latePhase: rk.late_phase, patientMatch: rk.patient_match,
     });
-    const res = await search(targets, String(input.query ?? ""), mode, topK,
-      { ranking: isActive(ranking) ? ranking : null, patient });
+    const res = await search(targets, String(input.query ?? ""), mode, topK, {
+      ranking: isActive(ranking) ? ranking : null, patient,
+      fusion: input.rerank === true && mode === "hybrid" ? "rerank" : "server",
+      diversify: parseDiversify({ by: "org", per: input.max_per_source_group }),
+    });
     updateActiveObservation({
       metadata: {
         mode, hits: res.hits.length, shownToModel: Math.min(res.hits.length, 15), boosts: describeRanking(ranking),
+        rerank: res.runs.filter((r) => r.rerank).map((r) => ({ source: r.short, ...r.rerank })), diversify: res.diversify,
         // The turbopuffer filters each namespace actually applied, which can differ from what the model asked for.
         namespaces: res.runs.map((r) => ({ source: r.short, filters: r.filters })),
       },

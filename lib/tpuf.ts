@@ -6,6 +6,7 @@ import { config, NS, RRF_K } from "./config";
 import { tpCall } from "./tpuf-log";
 import { tracedFetch } from "./traced-fetch";
 import { COMPUTED, isActive, keywordPlan, type Ranking } from "./ranking";
+import { diversifyAttr, type Diversify } from "./grouping";
 import type { CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
@@ -154,13 +155,23 @@ function compareFusion(server: Row[], app: [string, Signals][], verifyMs: number
 }
 
 async function searchNamespace(namespace: string, query: string, mode: Mode, filter: Filter | null, topK: number,
-  terms: string[], fusion: Fusion, verify: boolean, ranking: Ranking | null, patient: Patient | null): Promise<NsResult> {
+  terms: string[], fusion: Fusion, verify: boolean, ranking: Ranking | null, patient: Patient | null,
+  extra: { diversify: Diversify | null; candidates: number }): Promise<NsResult> {
   const kind = kindOf(namespace);
-  const base: Record<string, unknown> = { top_k: topK, include_attributes: DISPLAY[kind] };
+  const reranking = mode === "hybrid" && fusion === "rerank";
+  // With model reranking each subquery returns `candidates` rows (not topK), with `text` included for the model to read.
+  const perList = reranking ? Math.max(extra.candidates, topK) : topK;
+  const divAttr = diversifyAttr(extra.diversify, kind);
+  const size: Record<string, unknown> = divAttr
+    ? { limit: { total: perList, per: { attributes: [divAttr], limit: extra.diversify!.per } } }
+    : { top_k: perList };
+  const base: Record<string, unknown> = { ...size, include_attributes: reranking ? [...DISPLAY[kind], "text"] : DISPLAY[kind] };
   if (filter) base.filters = filter;
   const vec = { ...base, rank_by: ["text", "ANN", ["Embed", query]] };
-  // The keyword subquery: plain BM25, or BM25 plus the requested boosts (see lib/ranking.ts).
-  const plan = keywordPlan(kind, query, mode === "vector" ? null : ranking, patient, config.bm25Midpoint);
+  // The keyword subquery: plain BM25, or BM25 plus the requested boosts (see lib/ranking.ts). The reranker rescores
+  // everything, so boosts are skipped (and listed as skipped) in that mode.
+  const plan = keywordPlan(kind, query, mode === "vector" || reranking ? null : ranking, patient, config.bm25Midpoint);
+  if (reranking && isActive(ranking)) plan.skipped.push({ key: "recruiting", label: "Ranking boosts", why: "the model reranker rescores every candidate" });
   const boosted = plan.parts.length > 0;
   /**
    * Level 0: boosts with a per-result breakdown (compute_attributes). Level 1: boosts only. Level 2: plain BM25.
@@ -186,20 +197,49 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
   let request: unknown = null;
   let level: 0 | 1 | 2 = boosted ? 0 : 2;
   let rankingError: string | null = null;
+  let rerankError: string | null = null;
+  let effective: Fusion = fusion; // what actually ran (rerank falls back to "server" if the model call fails)
+  let compareServerMs: number | null = null;
   const ns = tp().namespace(namespace);
 
   const execute = async (txt: Record<string, unknown>) => {
     // Server fusion: turbopuffer merges the two subqueries itself and returns one list of up to topK, scored in $dist.
     const fusedReq = { queries: [vec, txt], rerank_by: ["RRF"], limit: topK };
     request = mode === "vector" ? strip(vec) : mode === "bm25" ? strip(txt)
-      : serverFusion ? { ...fusedReq, queries: [strip(vec), strip(txt)] } : { queries: [strip(vec), strip(txt)] };
+      : serverFusion || reranking ? { ...fusedReq, queries: [strip(vec), strip(txt)] } : { queries: [strip(vec), strip(txt)] };
     if (mode === "hybrid") {
       const unfusedReq = { queries: [vec, txt] };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const unfused = (label: string): Promise<any> =>
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         tpCall("multi_query", namespace, unfusedReq, () => ns.multiQuery(unfusedReq as any), { label });
-      if (serverFusion) {
+      if (reranking && !rerankError) {
+        // Model rerank: turbopuffer pools both subqueries' candidates and has the model score each one's `text` against
+        // the query. The unfused lists come back in parallel, so the app knows where RRF would have put each result.
+        const rrReq = { queries: [vec, txt], rerank_by: { model: config.rerankModel, attribute: "text", query }, limit: topK };
+        request = { ...rrReq, queries: [strip(vec), strip(txt)] };
+        try {
+          const tv = performance.now();
+          const [res, raw] = await Promise.all([
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            tpCall("multi_query", namespace, rrReq, () => ns.multiQuery(rrReq as any), { label: "search-rerank" }) as Promise<any>,
+            unfused("search-compare").then((r) => { verifyMs = performance.now() - tv; return r; }),
+          ]);
+          serverRows = res.results?.[0]?.rows ?? [];
+          perf = res.performance ?? {};
+          lists = { vector: raw.results?.[0]?.rows ?? [], bm25: raw.results?.[1]?.rows ?? [] };
+          compareServerMs = typeof raw.performance?.server_total_ms === "number" ? raw.performance.server_total_ms : null;
+          effective = "rerank";
+          return;
+        } catch (e) {
+          const status = (e as { status?: number }).status;
+          if (status === 404) throw e;
+          // Model not enabled in this region, unknown model name, quota… fall back to turbopuffer RRF and say so.
+          rerankError = `Model rerank failed${status ? ` (${status})` : ""}: ${String((e as Error).message).slice(0, 200)}. Showing turbopuffer RRF instead.`;
+          effective = "server";
+        }
+      }
+      if (serverFusion || reranking) {
         // The fused request gives the results. With verification, the two unfused lists come back in parallel, so the
         // app can recompute RRF, check it against turbopuffer's, and show each result's rank in both lists.
         const tv = performance.now();
@@ -248,7 +288,8 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
 
   const app = fuseInApp(lists);
   const appOrder = byFused(app);
-  const check = serverRows && verify ? compareFusion(serverRows, appOrder.slice(0, topK), verifyMs) : null;
+  const check = serverRows && verify && effective === "server" ? compareFusion(serverRows, appOrder.slice(0, topK), verifyMs) : null;
+  const rrfRankOf = new Map(appOrder.map(([id], i) => [id, i + 1]));
 
   // The ranked list to show: turbopuffer's order with server fusion, otherwise the app's.
   const ordered: { id: string; row: Row; fused: number; appFused: number | null; vector: Hit["vector"]; bm25: Hit["bm25"] }[] =
@@ -282,10 +323,13 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       meta: p.meta.filter(Boolean), code: p.code,
       snippet: p.body.length > 420 ? p.body.slice(0, 420) + "…" : p.body,
       nsRank: i + 1, fused: d.fused, appFused: d.appFused, vector: d.vector, bm25: d.bm25, boost: boostOf(d.id, d.row),
+      ...(effective === "rerank" ? { rerankScore: d.fused, rrfRank: rrfRankOf.get(d.id) ?? null } : {}),
       terms: terms.filter((t) => new RegExp(`\\b${t.replace(/[-]/g, "\\-")}`).test(visible)),
-      raw: d.row as Record<string, unknown>,
+      // `text` (title + body, only fetched for the reranker) duplicates what's shown; keep it out of the response.
+      raw: Object.fromEntries(Object.entries(d.row).filter(([k]) => k !== "text")) as Record<string, unknown>,
     };
   });
+  const shifts = effective === "rerank" ? hits.map((h, i) => Math.abs((rrfRankOf.get(h.id) ?? topK + 1) - (i + 1))) : [];
 
   const num = (k: string) => (typeof perf[k] === "number" ? (perf[k] as number) : null);
   return {
@@ -295,7 +339,14 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       serverMs: num("server_total_ms"), embeddingMs: num("embedding_ms"),
       cache: typeof perf.cache_temperature === "string" ? perf.cache_temperature : null,
       docs: num("approx_namespace_size"), filters: describeFilter(filter), request,
-      ...(mode === "hybrid" ? { fusion, check } : {}),
+      ...(mode === "hybrid" ? { fusion: effective, check } : {}),
+      rerank: reranking ? {
+        model: config.rerankModel, candidates: perList,
+        changedTop: shifts.filter((x) => x > 0).length,
+        avgShift: shifts.length ? shifts.reduce((a, b) => a + b, 0) / shifts.length : 0,
+        retrievalServerMs: compareServerMs, error: rerankError,
+      } : null,
+      diversify: divAttr ? { attribute: divAttr, per: extra.diversify!.per } : null,
       ranking: plan.parts.length || plan.skipped.length || rankingError ? {
         applied: level === 2 ? [] : plan.parts.map((p) => `${p.label} +${p.weight}`),
         skipped: plan.skipped.map((x) => `${x.label}: ${x.why}`),
@@ -308,14 +359,15 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
 }
 
 export async function search(targets: { namespace: string; filter: Filter | null }[], query: string, mode: Mode,
-  topK: number, opts: { fusion?: Fusion; verify?: boolean; ranking?: Ranking | null; patient?: Patient | null } = {}): Promise<SearchResponse> {
+  topK: number, opts: { fusion?: Fusion; verify?: boolean; ranking?: Ranking | null; patient?: Patient | null;
+    diversify?: Diversify | null; candidates?: number } = {}): Promise<SearchResponse> {
   const fusion: Fusion = opts.fusion ?? "server";
   const ranking = isActive(opts.ranking) ? opts.ranking! : null;
   const verify = opts.verify ?? config.fusionVerify;
   const terms = queryTerms(query);
   const t0 = performance.now();
   const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms, fusion, verify, ranking,
-    opts.patient ?? null)));
+    opts.patient ?? null, { diversify: opts.diversify ?? null, candidates: opts.candidates ?? config.rerankCandidates })));
   const wallMs = performance.now() - t0;
 
   // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order). This step
@@ -324,7 +376,7 @@ export async function search(targets: { namespace: string; filter: Filter | null
   merged.sort((a, b) => b.rrf - a.rrf);
   const hits: Hit[] = merged.map((h, i) => ({ ...h, overall: i + 1 }));
 
-  return { query, mode, fusion, ranking, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
+  return { query, mode, fusion, ranking, diversify: opts.diversify ?? null, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
 }
 
 // ------------------------------------------------------------------ patients and notes

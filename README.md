@@ -54,6 +54,8 @@ All patients are synthetic. Personal account details are blurred.
    | `TURBOPUFFER_REGION` | `aws-us-east-1` |
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `COPILOT_PROMPT_CACHE` | `true` turns on Anthropic prompt caching for the copilot (optional; off by default) |
+   | `RERANK_MODEL` | reranking model for **Model rerank** (optional; default `zeroentropy/zerank-2`, must be enabled in your turbopuffer region) |
+   | `RERANK_CANDIDATES` | default candidates per list sent to the reranker (optional; 30) |
    | `BOOST_BM25_MIDPOINT` | BM25 score that ranking boosts treat as 0.5 relevance (optional; default 6) |
    | `FUSION_VERIFY` | `false` skips the parallel unfused request that checks turbopuffer's RRF against the app's (optional; on by default) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
@@ -208,6 +210,18 @@ npm run dev                  # http://localhost:3000
     documents have exactly equal scores count as ties, since turbopuffer doesn't document its
     tie-break. `FUSION_VERIFY=false` skips the extra request (and the per-list ranks with it).
   - **In app**: turbopuffer returns the two lists and the app fuses them, as before.
+- **Model rerank** (a third **Fused by** option, and the copilot's `rerank: true`): the same multi-query with
+  `rerank_by: { model, attribute: "text", query }` instead of RRF. Each subquery returns 20/30/40 candidates (with
+  `text` for the model to read), turbopuffer scores them with the model, and the top `topK` come back. The unfused
+  lists are fetched in parallel, so each result shows where RRF would have put it (▲/▼ on the card, the RRF score in
+  Explain) and each source reports how many positions changed and the extra server time. Boosts are off in this mode
+  (the model rescores everything). If the model call fails (not enabled in your region, unknown model), the search
+  falls back to turbopuffer RRF and says so. `RERANK_MODEL` (default `zeroentropy/zerank-2`) and `RERANK_CANDIDATES`.
+- **Group by** arranges the shown results into sections (sponsor/journal, status/topic, year, phase/study type,
+  condition, source) without changing ranks, so it works after any fusion, including the reranker. **At most N per**
+  asks turbopuffer to diversify instead: `limit: { total, per: { attributes: [sponsor | journal | status | topic |
+  year], limit: N } }` on each subquery, applied before fusion or reranking. The copilot can set it with
+  `max_per_source_group`.
 - **Ranking boosts** (the **Ranking** button, and the copilot's `ranking` tool field) are optional and off by
   default. Each one adds to the keyword (BM25) subquery's score without filtering anything out:
   `Sum[ Saturate(BM25, midpoint 6), w × favor-recruiting, w × recency steps, w × evidence level, w × late phase,

@@ -5,6 +5,7 @@ import { NS } from "@/lib/config";
 import { getPatient } from "@/lib/patients";
 import { buildFilters, search } from "@/lib/tpuf";
 import { describeRanking, isActive, parseRanking } from "@/lib/ranking";
+import { parseDiversify } from "@/lib/grouping";
 import type { Fusion, Mode, SearchFilters, Source } from "@/lib/types";
 import { requireUserId } from "@/lib/session";
 
@@ -15,13 +16,16 @@ export async function POST(req: Request) {
   if (user instanceof Response) return user;
   const body = (await req.json()) as {
     q: string; sources?: Source[]; scope?: string; mode: Mode; fusion?: Fusion; filters: SearchFilters; topK?: number;
-    patientId?: string; ranking?: unknown;
+    patientId?: string; ranking?: unknown; diversify?: unknown; candidates?: number;
   };
   const q = (body.q ?? "").trim().slice(0, 500);
   if (!q) return NextResponse.json({ error: "Type something to search for." }, { status: 400 });
   const mode: Mode = ["hybrid", "vector", "bm25"].includes(body.mode) ? body.mode : "hybrid";
   // Hybrid fusion: on turbopuffer (rerank_by ["RRF"], the default) or in the app.
-  const fusion: Fusion = body.fusion === "app" ? "app" : "server";
+  const fusion: Fusion = body.fusion === "app" ? "app" : body.fusion === "rerank" ? "rerank" : "server";
+  // Optional turbopuffer-side diversification (at most N results per sponsor/journal/status/year) and rerank depth.
+  const diversify = parseDiversify(body.diversify);
+  const candidates = [20, 30, 40].includes(Number(body.candidates)) ? Number(body.candidates) : undefined;
   // Optional boosts and recency on the keyword side; all off unless the request turns them on.
   const ranking = parseRanking(body.ranking);
   const boosts = describeRanking(ranking);
@@ -41,11 +45,13 @@ export async function POST(req: Request) {
   // One Langfuse trace per search (tagged "search"), with each namespace's turbopuffer call nested under it.
   after(flushLangfuse);
   try {
-    const res = await newTrace({ userId: user, tags: ["search"], metadata: { sources, mode, fusion, topK, boosts } }, () =>
+    const res = await newTrace({ userId: user, tags: ["search"], metadata: { sources, mode, fusion, topK, boosts, diversify } }, () =>
       startActiveObservation("search-page", async (obs) => {
         obs.update({ input: { q, sources, mode, fusion, boosts, topK, filters: f, patientId: patient?.id ?? null } });
-        const out = await search(targets, q, mode, topK, { fusion, ranking: isActive(ranking) ? ranking : null, patient });
+        const out = await search(targets, q, mode, topK, { fusion, ranking: isActive(ranking) ? ranking : null, patient,
+          diversify, candidates });
         obs.update({ output: { wallMs: Math.round(out.wallMs), hits: out.hits.length,
+          rerank: out.runs.filter((r) => r.rerank).map((r) => ({ ns: r.short, ...r.rerank })),
           fusionChecks: out.runs.filter((r) => r.check).map((r) => ({ ns: r.short, matches: r.check!.matches, sameIds: r.check!.sameIds,
             tieSwaps: r.check!.tieSwaps, maxScoreDiff: r.check!.maxScoreDiff })),
           top: out.hits.slice(0, 10).map((h) => ({ rank: h.overall, kind: h.kind, id: h.id, title: h.title })) } });
