@@ -5,7 +5,8 @@ import Turbopuffer from "@turbopuffer/turbopuffer";
 import { config, NS, RRF_K } from "./config";
 import { tpCall } from "./tpuf-log";
 import { tracedFetch } from "./traced-fetch";
-import type { CorpusStat, Facet, Fusion, FusionCheck, Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
+import { COMPUTED, isActive, keywordPlan, type Ranking } from "./ranking";
+import type { CorpusStat, Facet, Fusion, FusionCheck, Hit, HitBoost, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
@@ -153,26 +154,45 @@ function compareFusion(server: Row[], app: [string, Signals][], verifyMs: number
 }
 
 async function searchNamespace(namespace: string, query: string, mode: Mode, filter: Filter | null, topK: number,
-  terms: string[], fusion: Fusion, verify: boolean): Promise<NsResult> {
+  terms: string[], fusion: Fusion, verify: boolean, ranking: Ranking | null, patient: Patient | null): Promise<NsResult> {
   const kind = kindOf(namespace);
   const base: Record<string, unknown> = { top_k: topK, include_attributes: DISPLAY[kind] };
   if (filter) base.filters = filter;
   const vec = { ...base, rank_by: ["text", "ANN", ["Embed", query]] };
-  const txt = { ...base, rank_by: ["text", "BM25", query] };
+  // The keyword subquery: plain BM25, or BM25 plus the requested boosts (see lib/ranking.ts).
+  const plan = keywordPlan(kind, query, mode === "vector" ? null : ranking, patient, config.bm25Midpoint);
+  const boosted = plan.parts.length > 0;
+  /**
+   * Level 0: boosts with a per-result breakdown (compute_attributes). Level 1: boosts only. Level 2: plain BM25.
+   * The boost expressions can't be tested against every turbopuffer version from here, so a 400 on a boosted request
+   * steps down a level instead of failing the search, and the run says what happened.
+   */
+  const keyword = (level: 0 | 1 | 2) => {
+    if (!boosted || level === 2) return { ...base, rank_by: ["text", "BM25", query] };
+    const f = plan.gate ? (filter ? ["And", [filter, plan.gate]] : plan.gate) : filter;
+    return {
+      ...base, ...(f ? { filters: f } : {}), rank_by: plan.rankBy,
+      ...(level === 0 && plan.compute ? { compute_attributes: plan.compute } : {}),
+    };
+  };
   const strip = (q: Record<string, unknown>) => Object.fromEntries(Object.entries(q).filter(([k]) => k !== "include_attributes"));
   const serverFusion = mode === "hybrid" && fusion === "server";
-  // Server fusion: turbopuffer merges the two subqueries itself and returns one list of up to topK, scored in $dist.
-  const fusedReq = { queries: [vec, txt], rerank_by: ["RRF"], limit: topK };
-  const request = mode === "vector" ? strip(vec) : mode === "bm25" ? strip(txt)
-    : serverFusion ? { ...fusedReq, queries: [strip(vec), strip(txt)] } : { queries: [strip(vec), strip(txt)] };
 
   const t0 = performance.now();
-  let lists: Lists = {};
-  let serverRows: Row[] | null = null;
+  let lists = {} as Lists;
+  let serverRows = null as Row[] | null; // assigned inside execute(); the cast stops TS narrowing it to null
   let perf: Record<string, unknown> = {};
   let verifyMs = 0;
-  try {
-    const ns = tp().namespace(namespace);
+  let request: unknown = null;
+  let level: 0 | 1 | 2 = boosted ? 0 : 2;
+  let rankingError: string | null = null;
+  const ns = tp().namespace(namespace);
+
+  const execute = async (txt: Record<string, unknown>) => {
+    // Server fusion: turbopuffer merges the two subqueries itself and returns one list of up to topK, scored in $dist.
+    const fusedReq = { queries: [vec, txt], rerank_by: ["RRF"], limit: topK };
+    request = mode === "vector" ? strip(vec) : mode === "bm25" ? strip(txt)
+      : serverFusion ? { ...fusedReq, queries: [strip(vec), strip(txt)] } : { queries: [strip(vec), strip(txt)] };
     if (mode === "hybrid") {
       const unfusedReq = { queries: [vec, txt] };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -190,7 +210,7 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
         ]);
         serverRows = fusedRes.results?.[0]?.rows ?? [];
         perf = fusedRes.performance ?? {};
-        if (raw) lists = { vector: raw.results?.[0]?.rows ?? [], bm25: raw.results?.[1]?.rows ?? [] };
+        lists = raw ? { vector: raw.results?.[0]?.rows ?? [], bm25: raw.results?.[1]?.rows ?? [] } : {};
       } else {
         // App fusion: one request, two ranked lists back, fused below.
         const res = await unfused("search");
@@ -203,6 +223,23 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: "search" });
       lists = { [mode]: res.rows ?? [] };
       perf = res.performance ?? {};
+    }
+  };
+
+  try {
+    for (;;) {
+      try {
+        await execute(keyword(level));
+        break;
+      } catch (e: unknown) {
+        const status = (e as { status?: number }).status;
+        if (status === 400 && level < 2) {
+          rankingError = `turbopuffer rejected the ${level === 0 ? "per-result breakdown" : "boost expression"}: ${String((e as Error).message).slice(0, 240)}`;
+          level = (level + 1) as 1 | 2;
+          continue;
+        }
+        throw e;
+      }
     }
   } catch (e: unknown) {
     if ((e as { status?: number }).status !== 404) throw e;
@@ -223,6 +260,20 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       })
       : appOrder.map(([id, d]) => ({ id, row: d.row, fused: d.fused, appFused: null, vector: d.vector, bm25: d.bm25 }));
 
+  // Per-result boost breakdown from the computed attributes (on the keyword list's row, or the fused row).
+  const bm25Rows = new Map((lists.bm25 ?? []).map((r) => [String(r.id), r]));
+  const boostOf = (id: string, row: Row): HitBoost | null => {
+    if (level !== 0) return null;
+    const src = bm25Rows.get(id) ?? row;
+    const rel = src[COMPUTED.relevance];
+    if (typeof rel !== "number") return null;
+    const parts = plan.parts.map((p) => {
+      const raw = Number(src[COMPUTED.part(p.key)] ?? 0);
+      return { key: p.key, label: p.label, weight: p.weight, raw, value: raw * p.weight };
+    });
+    return { relevance: rel, parts, total: rel + parts.reduce((a, b) => a + b.value, 0) };
+  };
+
   const hits = ordered.slice(0, topK).map((d, i) => {
     const p = present(kind, d.row);
     const visible = `${p.title} ${p.body}`.toLowerCase();
@@ -230,7 +281,7 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       key: `${namespace}:${d.id}`, id: d.id, kind, namespace, title: p.title, url: p.url,
       meta: p.meta.filter(Boolean), code: p.code,
       snippet: p.body.length > 420 ? p.body.slice(0, 420) + "…" : p.body,
-      nsRank: i + 1, fused: d.fused, appFused: d.appFused, vector: d.vector, bm25: d.bm25,
+      nsRank: i + 1, fused: d.fused, appFused: d.appFused, vector: d.vector, bm25: d.bm25, boost: boostOf(d.id, d.row),
       terms: terms.filter((t) => new RegExp(`\\b${t.replace(/[-]/g, "\\-")}`).test(visible)),
       raw: d.row as Record<string, unknown>,
     };
@@ -245,17 +296,26 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       cache: typeof perf.cache_temperature === "string" ? perf.cache_temperature : null,
       docs: num("approx_namespace_size"), filters: describeFilter(filter), request,
       ...(mode === "hybrid" ? { fusion, check } : {}),
+      ranking: plan.parts.length || plan.skipped.length || rankingError ? {
+        applied: level === 2 ? [] : plan.parts.map((p) => `${p.label} +${p.weight}`),
+        skipped: plan.skipped.map((x) => `${x.label}: ${x.why}`),
+        breakdown: level === 0,
+        bm25Midpoint: plan.bm25Midpoint,
+        error: rankingError,
+      } : null,
     },
   };
 }
 
 export async function search(targets: { namespace: string; filter: Filter | null }[], query: string, mode: Mode,
-  topK: number, opts: { fusion?: Fusion; verify?: boolean } = {}): Promise<SearchResponse> {
+  topK: number, opts: { fusion?: Fusion; verify?: boolean; ranking?: Ranking | null; patient?: Patient | null } = {}): Promise<SearchResponse> {
   const fusion: Fusion = opts.fusion ?? "server";
+  const ranking = isActive(opts.ranking) ? opts.ranking! : null;
   const verify = opts.verify ?? config.fusionVerify;
   const terms = queryTerms(query);
   const t0 = performance.now();
-  const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms, fusion, verify)));
+  const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms, fusion, verify, ranking,
+    opts.patient ?? null)));
   const wallMs = performance.now() - t0;
 
   // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order). This step
@@ -264,7 +324,7 @@ export async function search(targets: { namespace: string; filter: Filter | null
   merged.sort((a, b) => b.rrf - a.rrf);
   const hits: Hit[] = merged.map((h, i) => ({ ...h, overall: i + 1 }));
 
-  return { query, mode, fusion, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
+  return { query, mode, fusion, ranking, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
 }
 
 // ------------------------------------------------------------------ patients and notes

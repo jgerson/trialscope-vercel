@@ -19,6 +19,8 @@ export const config = {
   // Hybrid search fuses on turbopuffer (rerank_by ["RRF"]). With verification on (the default), each hybrid search also
   // fetches the two unfused lists in parallel, recomputes RRF in the app, and checks the two agree. That second request
   // is what powers the per-list ranks in the Explain panel. FUSION_VERIFY=false skips it.
+  // Ranking boosts map BM25 into 0..1 with Saturate; this is the BM25 score that becomes 0.5 (see lib/ranking.ts).
+  bm25Midpoint: Number(process.env.BOOST_BM25_MIDPOINT) > 0 ? Number(process.env.BOOST_BM25_MIDPOINT) : 6,
   fusionVerify: !["0", "false", "no"].includes((process.env.FUSION_VERIFY ?? "").toLowerCase()),
 };
 

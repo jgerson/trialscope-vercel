@@ -43,6 +43,7 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         {Math.round(run.roundMs)} ms round trip.
       </p>
       {run.fusion === "server" && <FusionBadge check={run.check ?? null} />}
+      {run.ranking && <RankingNote ranking={run.ranking} />}
       {run.filters.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {run.filters.map((f) => <span key={f} className="rounded-md bg-paper px-2 py-0.5 text-xs text-ink-2">{f}</span>)}
@@ -55,6 +56,19 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         </pre>
       </details>
       {run.request != null && <PlanAndConsistency run={run} mode={mode} />}
+    </div>
+  );
+}
+
+/** Which boosts this source's keyword subquery ran with, which didn't apply, and any step-down after a rejection. */
+function RankingNote({ ranking }: { ranking: NonNullable<NamespaceRun["ranking"]> }) {
+  return (
+    <div className="mt-1.5 rounded-lg bg-accent-soft/60 px-2.5 py-1.5 text-[12.5px] leading-relaxed text-ink-2">
+      {ranking.applied.length
+        ? <>Keyword ranking boosted: {ranking.applied.join(", ")} (relevance = Saturate(BM25, midpoint {ranking.bm25Midpoint}), 0–1).</>
+        : <>No boosts applied here.</>}
+      {ranking.skipped.length > 0 && <span className="text-slate"> Skipped: {ranking.skipped.join("; ")}.</span>}
+      {ranking.error && <span className="block text-amber-800">{ranking.error}. {ranking.applied.length ? "Ran without the per-result breakdown." : "Ran as plain BM25."}</span>}
     </div>
   );
 }
@@ -226,6 +240,27 @@ export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search 
           </Signal>
         )}
       </div>
+
+      {hit.boost && (
+        <>
+          <h4 className="mt-5 mb-2 text-[13px] font-semibold text-ink">Keyword score with boosts</h4>
+          <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
+            <div>relevance (BM25 → 0–1)&nbsp;&nbsp;{hit.boost.relevance.toFixed(3)}</div>
+            {hit.boost.parts.map((p) => (
+              <div key={p.key} className={p.value ? "" : "text-slate"}>
+                + {p.label.toLowerCase()}&nbsp;&nbsp;{p.raw.toFixed(2)} × {p.weight} = {p.value.toFixed(3)}
+              </div>
+            ))}
+            <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">
+              keyword score = {hit.boost.total.toFixed(3)}{hit.bm25 ? ` → #${hit.bm25.rank} in the keyword list` : ""}
+            </div>
+          </div>
+          <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate">
+            Each part was computed by turbopuffer (compute_attributes) with the same expressions used to rank. Boosts add to the
+            keyword score only; {data.mode === "hybrid" ? "the vector rank is unchanged, and RRF fuses the boosted keyword rank with it below." : "this is the score the results are sorted by."}
+          </p>
+        </>
+      )}
 
       {data.mode === "hybrid" && (
         <>

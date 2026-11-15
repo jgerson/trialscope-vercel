@@ -54,6 +54,7 @@ All patients are synthetic. Personal account details are blurred.
    | `TURBOPUFFER_REGION` | `aws-us-east-1` |
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `COPILOT_PROMPT_CACHE` | `true` turns on Anthropic prompt caching for the copilot (optional; off by default) |
+   | `BOOST_BM25_MIDPOINT` | BM25 score that ranking boosts treat as 0.5 relevance (optional; default 6) |
    | `FUSION_VERIFY` | `false` skips the parallel unfused request that checks turbopuffer's RRF against the app's (optional; on by default) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
@@ -207,6 +208,16 @@ npm run dev                  # http://localhost:3000
     documents have exactly equal scores count as ties, since turbopuffer doesn't document its
     tie-break. `FUSION_VERIFY=false` skips the extra request (and the per-list ranks with it).
   - **In app**: turbopuffer returns the two lists and the app fuses them, as before.
+- **Ranking boosts** (the **Ranking** button, and the copilot's `ranking` tool field) are optional and off by
+  default. Each one adds to the keyword (BM25) subquery's score without filtering anything out:
+  `Sum[ Saturate(BM25, midpoint 6), w × favor-recruiting, w × recency steps, w × evidence level, w × late phase,
+  w × fits-the-patient ]`, where each clause is a turbopuffer *rank by filter* (1 if it matches, 0 if not) and `w` is
+  Low/Medium/High = 0.15/0.3/0.6 on the 0–1 relevance scale. Recency is four `year ≥ t` steps (0.5 at the chosen
+  midpoint year, 0.75 a span later). A `ContainsAnyToken` filter keeps boosts from pulling in documents with no query
+  words, since turbopuffer drops zero-score rows. The vector subquery is unchanged, so in hybrid mode RRF fuses the
+  boosted keyword list with it as usual. `compute_attributes` returns each part per result for the Explain panel. If
+  turbopuffer rejects a boosted request (400), the search retries without the breakdown, then as plain BM25, and says
+  so. Settings live in the URL (`?rk=recruiting2.recent2-2020-4`). `BOOST_BM25_MIDPOINT` changes the BM25 midpoint.
 - **Several sources** are queried in parallel and merged by rank. That merge always runs in the
   app, because a multi-query (and so turbopuffer's RRF) covers one namespace.
 - **Several sources** are queried in parallel and merged by rank.

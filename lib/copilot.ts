@@ -5,6 +5,7 @@ import { getVercelOidcToken } from "@vercel/oidc";
 import { config, NS } from "./config";
 import { tracedFetch } from "./traced-fetch";
 import { buildFilters, listNotes, search } from "./tpuf";
+import { describeRanking, isActive, parseRanking } from "./ranking";
 import { getActiveTraceId, startActiveObservation, startObservation, updateActiveObservation } from "@langfuse/tracing";
 import { assistantMessage, promptOf, usageOf } from "./langfuse";
 import { costOf, priceOf } from "./pricing";
@@ -33,6 +34,22 @@ const TOOLS: Anthropic.Tool[] = [
         country: { type: "string", description: "e.g. 'United States'" },
         match_patient_age_sex: { type: "boolean" },
         pubmed_year_from: { type: "integer" },
+        ranking: {
+          type: "object",
+          description:
+            "Optional soft ranking boosts. Unlike filters they never remove results, they move better fits up. Each is 0 " +
+            "(off, the default), 1 (low), 2 (medium) or 3 (high). Use them when the question implies a preference but a hard " +
+            "filter would be too strict, e.g. 'recent evidence' → recent + evidence, 'trials she could join' → recruiting + " +
+            "patient_match (or the hard filters when it must be strict).",
+          properties: {
+            recruiting: { type: "integer", minimum: 0, maximum: 3, description: "trials: Recruiting, then Not yet recruiting" },
+            recent: { type: "integer", minimum: 0, maximum: 3, description: "trials by start year, PubMed by publication year" },
+            recent_midpoint_year: { type: "integer", description: "year that gets half the recency boost; default 2020" },
+            evidence: { type: "integer", minimum: 0, maximum: 3, description: "PubMed: meta-analyses, reviews, guidelines > RCTs" },
+            late_phase: { type: "integer", minimum: 0, maximum: 3, description: "trials: Phase 3/4 > Phase 2" },
+            patient_match: { type: "integer", minimum: 0, maximum: 3, description: "trials whose age/sex range fits the current patient" },
+          },
+        },
         top_k: { type: "integer", description: "Results per source, 10 to 20. Defaults to 10." },
       },
       required: ["sources", "query"],
@@ -54,6 +71,8 @@ never the patient. Don't exclude or question a note because of who wrote it.
 - Ground every claim in tool results and cite it with the tag shown in the result, like [N2], [P1] or [T3].
 - For trial matching, first read the patient's notes, extract diagnosis, stage, biomarkers, age, sex and location, then \
 search trials with filters (usually status Recruiting or Not yet recruiting, the patient's country, and match_patient_age_sex).
+- Ranking boosts (the search tool's "ranking" field) reorder results without removing any. Prefer them over hard filters \
+when the user expresses a preference ("recent", "strong evidence", "late-phase") rather than a requirement.
 - Say plainly that eligibility needs physician review against the full protocol. Do not give treatment advice.
 - Only state eligibility details that appear in the tool results. If a fit depends on something the results don't show, \
 say it needs checking instead of assuming it.
@@ -235,10 +254,16 @@ async function copilotLoop(
     if (!targets.length) return "No valid sources.";
     // At least 10 per source: with abstracts as the only literature, a thin search leaves the model hedging.
     const topK = Math.min(20, Math.max(10, Number(input.top_k) || 10));
-    const res = await search(targets, String(input.query ?? ""), mode, topK);
+    const rk = (input.ranking ?? {}) as Record<string, unknown>;
+    const ranking = parseRanking({
+      recruiting: rk.recruiting, recent: rk.recent, recentMidpoint: rk.recent_midpoint_year, evidence: rk.evidence,
+      latePhase: rk.late_phase, patientMatch: rk.patient_match,
+    });
+    const res = await search(targets, String(input.query ?? ""), mode, topK,
+      { ranking: isActive(ranking) ? ranking : null, patient });
     updateActiveObservation({
       metadata: {
-        mode, hits: res.hits.length, shownToModel: Math.min(res.hits.length, 15),
+        mode, hits: res.hits.length, shownToModel: Math.min(res.hits.length, 15), boosts: describeRanking(ranking),
         // The turbopuffer filters each namespace actually applied, which can differ from what the model asked for.
         namespaces: res.runs.map((r) => ({ source: r.short, filters: r.filters })),
       },

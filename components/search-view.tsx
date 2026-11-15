@@ -2,11 +2,13 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, ClipboardCheck, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
+import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
 import type { CorpusStat, Facet, Fusion, Hit, Mode, Patient, SearchFilters, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
 import { HitExplainer, RunOverview } from "./explain";
+import { BOOSTS, DEFAULT_MIDPOINT, DEFAULT_SPAN, isActive, rankingFromParam, rankingToParam, STRENGTH_LABEL,
+  STRENGTH_WEIGHT, type Ranking, type Strength } from "@/lib/ranking";
 import { cx, highlight, Segmented, SourceTag, Tip } from "./ui";
 
 const EXAMPLES = ["trastuzumab cardiotoxicity monitoring", "EGFR exon 19 resistance after osimertinib",
@@ -52,6 +54,9 @@ export function SearchView() {
   const [{ area, lit }, setSources] = useState(() => initialSources(params));
   const [mode, setMode] = useState<Mode>((params.get("mode") as Mode) || "hybrid");
   const [fusion, setFusion] = useState<Fusion>(params.get("fusion") === "app" ? "app" : "server");
+  // Optional boosts and recency (all off by default), kept in the URL as ?rk=… so a link reproduces the ranking.
+  const [ranking, setRanking] = useState<Ranking>(() => rankingFromParam(params.get("rk")));
+  const rankingKey = rankingToParam(ranking);
   const [filters, setFilters] = useState<SearchFilters>({});
   const [topK, setTopK] = useState(10);
   const [data, setData] = useState<SearchResponse | null>(null);
@@ -69,7 +74,8 @@ export function SearchView() {
     try {
       const res = await fetch("/api/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, fusion, filters, topK, patientId: patient?.id }),
+        body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, fusion, ranking: rankingFromParam(rankingKey),
+          filters, topK, patientId: patient?.id }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Search failed.");
@@ -79,7 +85,7 @@ export function SearchView() {
     } finally {
       setLoading(false);
     }
-  }, [sourcesKey, mode, fusion, filters, topK, patient?.id]);
+  }, [sourcesKey, mode, fusion, rankingKey, filters, topK, patient?.id]);
 
   // Re-run whenever the query in the URL or any control changes.
   useEffect(() => { setInput(q); run(q); }, [q, run]);
@@ -101,6 +107,7 @@ export function SearchView() {
     else if (lit.length < LITERATURE.length) sp.set("in", lit.join(","));
     if (mode !== "hybrid") sp.set("mode", mode);
     else if (fusion === "app") sp.set("fusion", "app");
+    if (rankingKey) sp.set("rk", rankingKey);
     router.replace(`/?${sp.toString()}`, { scroll: false });
     // The search re-runs when the query in the URL changes. Searching the same words again (say, after switching from
     // hybrid to vector) leaves the query unchanged, so run it directly.
@@ -177,6 +184,7 @@ export function SearchView() {
               <Segmented label="Fusion" value={fusion} options={FUSIONS} onChange={setFusion} />
             </div>
           )}
+          <RankingButton ranking={ranking} setRanking={setRanking} mode={mode} sources={sources} patient={patient} />
           <FiltersButton filters={filters} setFilters={setFilters} topK={topK} setTopK={setTopK} active={activeFilters}
             sources={sources} patient={patient} />
         </div>
@@ -370,6 +378,99 @@ function SkeletonCard() {
       <div className="mt-3 h-4 w-3/4 rounded bg-paper" />
       <div className="mt-2.5 h-3 w-full rounded bg-paper" />
       <div className="mt-1.5 h-3 w-5/6 rounded bg-paper" />
+    </div>
+  );
+}
+
+/**
+ * Soft ranking: boosts and recency added to the keyword (BM25) side. Unlike filters they never remove a result. Each
+ * control is off by default; turning one on re-runs the search. Vector-only search has no keyword side to boost.
+ */
+function RankingButton({ ranking, setRanking, mode, sources, patient }: {
+  ranking: Ranking; setRanking: (r: Ranking) => void; mode: Mode; sources: Source[]; patient: Patient | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", close); document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc); };
+  }, [open]);
+  const vectorOnly = mode === "vector";
+  const kinds = sources.map((s) => (s === "notes" ? "notes" : s)) as ("notes" | "pubmed" | "trials")[];
+  const on = BOOSTS.filter((b) => (ranking[b.key] ?? 0) > 0);
+  const relevant = on.filter((b) => b.kinds.some((k) => kinds.includes(k)));
+  const set = (key: keyof Ranking, v: number) => setRanking({ ...ranking, [key]: v });
+  const select = "rounded-md border border-line bg-surface px-2 py-1 text-[12.5px] text-ink focus:border-accent focus:outline-none";
+
+  return (
+    <div ref={ref} className="relative">
+      <Tip text={vectorOnly ? "Boosts apply to keyword ranking, so they're off in vector-only search." : "Boost recruiting, recent or higher-evidence results without filtering anything out."}>
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} disabled={vectorOnly}
+          className={cx("inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[13px] font-medium disabled:opacity-50",
+            relevant.length && !vectorOnly ? "border-accent bg-accent-soft text-accent-strong" : "border-line bg-surface text-ink-2 hover:border-line-2")}>
+          <ArrowUpWideNarrow size={15} />Ranking{relevant.length && !vectorOnly ? ` (${relevant.length})` : ""}
+        </button>
+      </Tip>
+      {open && (
+        <div className="absolute top-full left-0 z-30 mt-2 w-[min(92vw,440px)] animate-fade-in rounded-2xl border border-line bg-surface p-5 shadow-pop">
+          <h3 className="text-[13px] font-semibold text-ink">Ranking boosts</h3>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-slate">
+            Added to the keyword score (relevance scaled 0–1), so they move results up without hiding any. The vector side is
+            unchanged; in hybrid mode RRF fuses the two lists as usual. All off by default.
+          </p>
+          <div className="mt-3 divide-y divide-line">
+            {BOOSTS.map((b) => {
+              const v = (ranking[b.key] ?? 0) as Strength;
+              const applies = b.kinds.some((k) => kinds.includes(k));
+              const needsPatient = b.key === "patientMatch" && !patient;
+              return (
+                <div key={b.key} className={cx("py-2.5", (!applies || needsPatient) && "opacity-60")}>
+                  <div className="flex items-center gap-3">
+                    <Tip text={b.hint} align="left"><span className="text-[13px] font-medium text-ink">{b.label}</span></Tip>
+                    <span className="text-[11.5px] text-slate">{b.kinds.join(", ")}</span>
+                    <div role="radiogroup" aria-label={b.label} className="ml-auto inline-flex rounded-md border border-line p-0.5">
+                      {([0, 1, 2, 3] as Strength[]).map((s) => (
+                        <button key={s} type="button" role="radio" aria-checked={v === s} onClick={() => set(b.key, s)}
+                          title={s ? `+${STRENGTH_WEIGHT[s]} at most` : "off"}
+                          className={cx("rounded px-2 py-0.5 text-[12px]", v === s ? "bg-ink text-white" : "text-slate hover:text-ink")}>
+                          {STRENGTH_LABEL[s]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {b.key === "recent" && v > 0 && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] text-slate">
+                      Half weight at
+                      <select className={select} value={ranking.recentMidpoint ?? DEFAULT_MIDPOINT}
+                        onChange={(e) => set("recentMidpoint", Number(e.target.value))}>
+                        {[2012, 2015, 2018, 2020, 2022, 2024].map((y) => <option key={y} value={y}>{y}</option>)}
+                      </select>
+                      , ¾ by
+                      <select className={select} value={ranking.recentSpan ?? DEFAULT_SPAN}
+                        onChange={(e) => set("recentSpan", Number(e.target.value))}>
+                        {[[2, "+2 years (sharp)"], [4, "+4 years"], [8, "+8 years (gentle)"]].map(([n, l]) => <option key={n} value={n}>{l}</option>)}
+                      </select>
+                    </div>
+                  )}
+                  {!applies && v > 0 && <p className="mt-1 text-[12px] text-slate">Not used for the sources you&apos;re searching.</p>}
+                  {needsPatient && v > 0 && <p className="mt-1 text-[12px] text-slate">Pick a patient on the left for this to apply.</p>}
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-[12px] text-slate">{on.length ? `${on.length} on` : "Nothing boosted"}</span>
+            <button type="button" disabled={!isActive(ranking)}
+              onClick={() => setRanking({ recentMidpoint: ranking.recentMidpoint, recentSpan: ranking.recentSpan })}
+              className="text-[12.5px] text-slate underline decoration-dotted underline-offset-2 hover:text-ink disabled:opacity-40">
+              Turn all off
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

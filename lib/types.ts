@@ -55,6 +55,8 @@ export interface Hit {
   rrf: number;
   vector: Signal | null;
   bm25: Signal | null;
+  /** With ranking boosts: this result's keyword score split into relevance and each boost (from compute_attributes). */
+  boost?: HitBoost | null;
   terms: string[];
   raw: Record<string, unknown>;
 }
@@ -74,6 +76,22 @@ export interface NamespaceRun {
   /** Hybrid only: who fused, and (server fusion with verification) whether the app's RRF agreed. */
   fusion?: Fusion;
   check?: FusionCheck | null;
+  ranking?: RunRanking | null;
+}
+
+export interface HitBoost {
+  relevance: number; // Saturate(BM25), 0..1
+  parts: { key: string; label: string; weight: number; raw: number; value: number }[]; // value = raw × weight
+  total: number; // relevance + Σ value: the keyword subquery's score
+}
+
+/** What the ranking boosts did on one namespace. */
+export interface RunRanking {
+  applied: string[];
+  skipped: string[];
+  breakdown: boolean; // per-result breakdown available
+  bm25Midpoint: number;
+  error: string | null; // set when turbopuffer rejected part of the boost request and the search stepped down
 }
 
 /** Server-side RRF compared with the app's own RRF over the same two unfused lists. */
@@ -121,6 +139,7 @@ export interface SearchResponse {
   query: string;
   mode: Mode;
   fusion: Fusion;
+  ranking: import("./ranking").Ranking | null;
   topK: number;
   rrfK: number;
   wallMs: number;
