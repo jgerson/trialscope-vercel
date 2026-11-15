@@ -210,7 +210,7 @@ async function copilotLoop(
         const h: Hit = {
           key: `${NS.patient(patient.id)}:${n.id}`, id: n.id, kind: "notes", namespace: NS.patient(patient.id), title: n.title,
           url: null, meta: [n.visit_date, n.note_type, n.author], code: null, snippet: n.body.slice(0, 900), nsRank: 0, overall: 0,
-          fused: 0, rrf: 0, vector: null, bm25: null, terms: [], raw: {},
+          fused: 0, appFused: null, rrf: 0, vector: null, bm25: null, terms: [], raw: {},
         };
         const t = tag(h);
         returned.push({ tag: t, title: h.title, key: h.key });

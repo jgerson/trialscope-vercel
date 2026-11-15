@@ -3,7 +3,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUpRight, ClipboardCheck, Info, Loader2, Search, SlidersHorizontal } from "lucide-react";
-import type { CorpusStat, Facet, Hit, Mode, Patient, SearchFilters, SearchResponse, Source } from "@/lib/types";
+import type { CorpusStat, Facet, Fusion, Hit, Mode, Patient, SearchFilters, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
 import { HitExplainer, RunOverview } from "./explain";
@@ -20,6 +20,11 @@ const MODES: { value: Mode; label: string; hint: string }[] = [
   { value: "hybrid", label: "Hybrid", hint: "Runs a meaning search and a keyword search in one request and merges the two ranked lists (reciprocal rank fusion). The best default." },
   { value: "vector", label: "Vector", hint: "Matches meaning: turbopuffer embeds your words and finds the closest documents, so it catches paraphrases and synonyms." },
   { value: "bm25", label: "BM25", hint: "Matches exact words, weighting rare ones more. Best for drug names, genes and trial ids." },
+];
+
+const FUSIONS: { value: Fusion; label: string; hint: string }[] = [
+  { value: "server", label: "turbopuffer", hint: "turbopuffer fuses the two lists itself (rerank_by [\"RRF\"]) and returns one ranked list. The app also recomputes RRF from the unfused lists to check they agree and to explain each result." },
+  { value: "app", label: "In app", hint: "turbopuffer returns the vector and BM25 lists separately and this app fuses them with the same RRF formula (k = 60)." },
 ];
 
 type Area = "notes" | "literature";
@@ -46,6 +51,7 @@ export function SearchView() {
   const [input, setInput] = useState(params.get("q") ?? "");
   const [{ area, lit }, setSources] = useState(() => initialSources(params));
   const [mode, setMode] = useState<Mode>((params.get("mode") as Mode) || "hybrid");
+  const [fusion, setFusion] = useState<Fusion>(params.get("fusion") === "app" ? "app" : "server");
   const [filters, setFilters] = useState<SearchFilters>({});
   const [topK, setTopK] = useState(10);
   const [data, setData] = useState<SearchResponse | null>(null);
@@ -63,7 +69,7 @@ export function SearchView() {
     try {
       const res = await fetch("/api/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, filters, topK, patientId: patient?.id }),
+        body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, fusion, filters, topK, patientId: patient?.id }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Search failed.");
@@ -73,7 +79,7 @@ export function SearchView() {
     } finally {
       setLoading(false);
     }
-  }, [sourcesKey, mode, filters, topK, patient?.id]);
+  }, [sourcesKey, mode, fusion, filters, topK, patient?.id]);
 
   // Re-run whenever the query in the URL or any control changes.
   useEffect(() => { setInput(q); run(q); }, [q, run]);
@@ -94,6 +100,7 @@ export function SearchView() {
     if (area === "notes") sp.set("in", "notes");
     else if (lit.length < LITERATURE.length) sp.set("in", lit.join(","));
     if (mode !== "hybrid") sp.set("mode", mode);
+    else if (fusion === "app") sp.set("fusion", "app");
     router.replace(`/?${sp.toString()}`, { scroll: false });
     // The search re-runs when the query in the URL changes. Searching the same words again (say, after switching from
     // hybrid to vector) leaves the query unchanged, so run it directly.
@@ -164,6 +171,12 @@ export function SearchView() {
             </div>
           )}
           <Segmented label="Retrieval" value={mode} options={MODES} onChange={setMode} />
+          {mode === "hybrid" && (
+            <div className="inline-flex items-center gap-2">
+              <span className="text-[12.5px] text-slate">Fused by</span>
+              <Segmented label="Fusion" value={fusion} options={FUSIONS} onChange={setFusion} />
+            </div>
+          )}
           <FiltersButton filters={filters} setFilters={setFilters} topK={topK} setTopK={setTopK} active={activeFilters}
             sources={sources} patient={patient} />
         </div>
@@ -203,7 +216,7 @@ export function SearchView() {
             <div className="flex items-baseline gap-3">
               <h2 className="font-display text-[32px] leading-none tracking-tight">{data ? `${data.hits.length} results` : "Searching"}</h2>
               {data && <span className="text-[13.5px] text-slate">
-                {MODES.find((m) => m.value === data.mode)?.label} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
+                {MODES.find((m) => m.value === data.mode)?.label}{data.mode === "hybrid" ? ` (fused ${data.fusion === "server" ? "on turbopuffer" : "in app"})` : ""} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
               </span>}
             </div>
             <div className={cx("mt-4 space-y-2.5 transition-opacity", loading && data && "opacity-50")}>

@@ -16,6 +16,10 @@ export const config = {
   // system prompt, tools and earlier turns; cached, those cost a fraction of the input price on the next call.
   promptCache: ["1", "true", "yes"].includes((process.env.COPILOT_PROMPT_CACHE ?? "").toLowerCase()),
   embedModel: "voyage/voyage-4-lite",
+  // Hybrid search fuses on turbopuffer (rerank_by ["RRF"]). With verification on (the default), each hybrid search also
+  // fetches the two unfused lists in parallel, recomputes RRF in the app, and checks the two agree. That second request
+  // is what powers the per-list ranks in the Explain panel. FUSION_VERIFY=false skips it.
+  fusionVerify: !["0", "false", "no"].includes((process.env.FUSION_VERIFY ?? "").toLowerCase()),
 };
 
 export const copilotEnabled = Boolean(config.anthropicKey || config.gatewayKey || config.onVercel);

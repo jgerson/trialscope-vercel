@@ -2,13 +2,15 @@
 // The right-hand panel: how the search ran, or why one result ranked where it did.
 import { useEffect, useState } from "react";
 import { ArrowUpRight, X } from "lucide-react";
-import type { Hit, NamespaceRun, SearchResponse } from "@/lib/types";
+import type { FusionCheck, Hit, NamespaceRun, SearchResponse } from "@/lib/types";
 import { cx, SourceTag } from "./ui";
 
 export function RunOverview({ data }: { data: SearchResponse }) {
   const n = data.runs.length;
   const how = {
-    hybrid: "Each request runs a vector search and a BM25 keyword search together in one multi_query, then fuses the two lists.",
+    hybrid: data.fusion === "server"
+      ? "Each request runs a vector search and a BM25 keyword search in one multi_query, and turbopuffer fuses the two lists itself with reciprocal rank fusion (rerank_by [\"RRF\"]). The app recomputes the fusion from the unfused lists to check it."
+      : "Each request runs a vector search and a BM25 keyword search together in one multi_query, then the app fuses the two lists.",
     vector: "Each request is a vector search: turbopuffer embeds the query and walks its nearest-neighbor index.",
     bm25: "Each request is a BM25 keyword search over the inverted index.",
   }[data.mode];
@@ -40,6 +42,7 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         {run.hits} hits. Server time includes {run.embeddingMs ?? 0} ms to embed the query; {run.cache ?? "unknown"} cache;{" "}
         {Math.round(run.roundMs)} ms round trip.
       </p>
+      {run.fusion === "server" && <FusionBadge check={run.check ?? null} />}
       {run.filters.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {run.filters.map((f) => <span key={f} className="rounded-md bg-paper px-2 py-0.5 text-xs text-ink-2">{f}</span>)}
@@ -52,6 +55,26 @@ function RunRow({ run, mode }: { run: NamespaceRun; mode: SearchResponse["mode"]
         </pre>
       </details>
       {run.request != null && <PlanAndConsistency run={run} mode={mode} />}
+    </div>
+  );
+}
+
+/** Did turbopuffer's RRF agree with the app's? Shown under each namespace when fusion ran on turbopuffer. */
+function FusionBadge({ check }: { check: FusionCheck | null }) {
+  if (!check) {
+    return <p className="mt-1.5 text-[12.5px] text-slate">Fused on turbopuffer. Verification is off (FUSION_VERIFY=false), so per-list ranks aren&apos;t shown.</p>;
+  }
+  const diff = check.maxScoreDiff < 1e-9 ? "0" : check.maxScoreDiff.toExponential(1);
+  return (
+    <div className={cx("mt-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] leading-relaxed",
+      check.matches ? "bg-emerald-50 text-emerald-900" : "bg-amber-50 text-amber-900")}>
+      {check.matches
+        ? <>✓ turbopuffer&apos;s RRF matches the app&apos;s: {check.sameIds}/{check.compared} positions identical
+          {check.tieSwaps ? `, ${check.tieSwaps} swapped within an exact score tie` : ""}, max score difference {diff}.</>
+        : <>⚠ turbopuffer&apos;s RRF differs from the app&apos;s
+          {check.firstMismatch ? ` at #${check.firstMismatch.position} (turbopuffer ${check.firstMismatch.server}, app ${check.firstMismatch.app})` : ""}
+          ; {check.sameIds}/{check.compared} positions identical, max score difference {diff}.</>}
+      <span className="text-slate"> Check request: {Math.round(check.verifyMs)} ms, run in parallel.</span>
     </div>
   );
 }
@@ -210,10 +233,25 @@ export function HitExplainer({ hit, data, onClose, closeLabel = "Back to search 
           <div className="rounded-xl bg-paper px-3 py-2.5 font-mono text-[12.5px] leading-7 text-ink-2">
             {hit.vector && <div>vector&nbsp;&nbsp;1/({k}+{hit.vector.rank}) = {(1 / (k + hit.vector.rank)).toFixed(4)}</div>}
             {hit.bm25 && <div>bm25&nbsp;&nbsp;&nbsp;&nbsp;1/({k}+{hit.bm25.rank}) = {(1 / (k + hit.bm25.rank)).toFixed(4)}</div>}
-            <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">fused = {hit.fused.toFixed(4)} → #{hit.nsRank} in {run.short}</div>
+            {data.fusion === "server" ? (
+              <>
+                {hit.appFused != null && <div className="mt-1 border-t border-line pt-1">app&apos;s RRF&nbsp;&nbsp;= {hit.appFused.toFixed(4)}</div>}
+                <div className={cx("font-semibold text-ink", hit.appFused == null && "mt-1 border-t border-line pt-1")}>
+                  turbopuffer = {hit.fused.toFixed(4)} → #{hit.nsRank} in {run.short}
+                  {hit.appFused != null && (Math.abs(hit.appFused - hit.fused) < 1e-6 ? " ✓" : " ≠")}
+                </div>
+              </>
+            ) : (
+              <div className="mt-1 border-t border-line pt-1 font-semibold text-ink">fused = {hit.fused.toFixed(4)} → #{hit.nsRank} in {run.short}</div>
+            )}
           </div>
           <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate">
             Reciprocal rank fusion adds 1/({k} + rank) from each list, so showing up in both lists beats a high rank in one.
+            {data.fusion === "server"
+              ? (hit.appFused != null
+                ? " turbopuffer computed this result's score and position (rerank_by [\"RRF\"], returned in $dist); the lines above are the app's own arithmetic over the unfused lists, as a check."
+                : " turbopuffer computed this result's score and position; with verification off there are no per-list ranks to show.")
+              : " The app did this arithmetic itself, from the two lists turbopuffer returned."}
           </p>
         </>
       )}

@@ -39,7 +39,10 @@ function searchable(label: string, op: TpufOp, namespace: string, ms: number, ne
   const out: Record<string, unknown> = {
     label, op, namespace, ms, networkMs, serverMs: s.serverMs, embeddingMs: s.embeddingMs, cache: s.cache,
     rowsTotal: rows.length ? rows.reduce((a, b) => a + b, 0) : undefined,
-    rowsVector: op === "multi_query" ? rows[0] : undefined, rowsBm25: op === "multi_query" ? rows[1] : undefined,
+    // Two lists = vector + BM25. A server-fused multi_query (rerank_by) returns one combined list instead.
+    rowsVector: op === "multi_query" && rows.length === 2 ? rows[0] : undefined,
+    rowsBm25: op === "multi_query" && rows.length === 2 ? rows[1] : undefined,
+    rowsFused: op === "multi_query" && rows.length === 1 ? rows[0] : undefined,
     billedBytesQueried: s.billedBytesQueried, billedBytesWritten: s.billedBytesWritten, slow: ms >= SLOW_MS,
   };
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined));

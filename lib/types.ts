@@ -2,6 +2,8 @@
 
 export type Kind = "notes" | "pubmed" | "trials";
 export type Mode = "hybrid" | "vector" | "bm25";
+/** Where hybrid results are fused: on turbopuffer (rerank_by ["RRF"]) or in this app's code. */
+export type Fusion = "server" | "app";
 /** A searchable source. "notes" is the selected patient's own namespace; the others are shared corpora. */
 export type Source = "notes" | "pubmed" | "trials";
 
@@ -46,7 +48,10 @@ export interface Hit {
   snippet: string;
   nsRank: number;
   overall: number;
+  /** RRF score that ordered this hit: turbopuffer's ($dist) with server fusion, the app's own otherwise. */
   fused: number;
+  /** With server fusion and verification on: the app's recomputed RRF score for the same document. */
+  appFused: number | null;
   rrf: number;
   vector: Signal | null;
   bm25: Signal | null;
@@ -66,6 +71,20 @@ export interface NamespaceRun {
   docs: number | null;
   filters: string[];
   request: unknown;
+  /** Hybrid only: who fused, and (server fusion with verification) whether the app's RRF agreed. */
+  fusion?: Fusion;
+  check?: FusionCheck | null;
+}
+
+/** Server-side RRF compared with the app's own RRF over the same two unfused lists. */
+export interface FusionCheck {
+  compared: number; // positions compared (the shorter of the two lists)
+  sameIds: number; // positions where both put the same document
+  tieSwaps: number; // positions that differ only because two documents have equal scores
+  maxScoreDiff: number; // largest |server − app| score for documents in both
+  firstMismatch: { position: number; server: string; app: string } | null; // first difference not explained by a tie
+  verifyMs: number; // round trip of the extra unfused request
+  matches: boolean;
 }
 
 export interface SearchFilters {
@@ -101,6 +120,7 @@ export interface Facet {
 export interface SearchResponse {
   query: string;
   mode: Mode;
+  fusion: Fusion;
   topK: number;
   rrfK: number;
   wallMs: number;

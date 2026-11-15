@@ -54,6 +54,7 @@ All patients are synthetic. Personal account details are blurred.
    | `TURBOPUFFER_REGION` | `aws-us-east-1` |
    | `COPILOT_MODEL` | defaults to `anthropic/claude-sonnet-5.5` via AI Gateway (optional) |
    | `COPILOT_PROMPT_CACHE` | `true` turns on Anthropic prompt caching for the copilot (optional; off by default) |
+   | `FUSION_VERIFY` | `false` skips the parallel unfused request that checks turbopuffer's RRF against the app's (optional; on by default) |
    | `ANTHROPIC_API_KEY` | calls Anthropic directly instead of AI Gateway (optional) |
    | `READ_ONLY` | `true` blocks note edits (optional) |
    | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | turn on Langfuse tracing (optional; mark the secret key sensitive) |
@@ -197,9 +198,17 @@ npm run dev                  # http://localhost:3000
 
 - Each document has one `text` attribute that is both BM25-indexed and natively embedded by
   turbopuffer (`voyage/voyage-4-lite`), so one attribute serves every mode.
-- **Hybrid** sends one `multiQuery` with a vector subquery and a BM25 subquery, then fuses the two
-  ranked lists with reciprocal rank fusion (k = 60, the same formula as turbopuffer's
-  `rerank_by: ["RRF"]`), keeping each list's rank for the explainer.
+- **Hybrid** sends one `multiQuery` with a vector subquery and a BM25 subquery, fused with
+  reciprocal rank fusion (k = 60). A **Fused by** toggle picks where:
+  - **turbopuffer** (default): the request carries `rerank_by: ["RRF"]` and `limit`, and turbopuffer
+    returns one fused list with the RRF score in `$dist`. In parallel, the app fetches the two
+    unfused lists, recomputes RRF itself and compares: the Explain panel shows a ✓ (or the first
+    position that differs) per namespace, plus both scores for each result. Positions where two
+    documents have exactly equal scores count as ties, since turbopuffer doesn't document its
+    tie-break. `FUSION_VERIFY=false` skips the extra request (and the per-list ranks with it).
+  - **In app**: turbopuffer returns the two lists and the app fuses them, as before.
+- **Several sources** are queried in parallel and merged by rank. That merge always runs in the
+  app, because a multi-query (and so turbopuffer's RRF) covers one namespace.
 - **Several sources** are queried in parallel and merged by rank.
 
 ## Data

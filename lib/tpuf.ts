@@ -5,7 +5,7 @@ import Turbopuffer from "@turbopuffer/turbopuffer";
 import { config, NS, RRF_K } from "./config";
 import { tpCall } from "./tpuf-log";
 import { tracedFetch } from "./traced-fetch";
-import type { CorpusStat, Facet, Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
+import type { CorpusStat, Facet, Fusion, FusionCheck, Hit, Kind, Mode, NamespaceRun, Note, Patient, SearchFilters, SearchResponse, Source, WriteReport } from "./types";
 
 let _client: Turbopuffer | null = null;
 export function tp(): Turbopuffer {
@@ -109,29 +109,94 @@ function present(kind: Kind, r: Row) {
 
 interface NsResult { run: NamespaceRun; hits: Omit<Hit, "overall" | "rrf">[] }
 
+type Lists = Partial<Record<"vector" | "bm25", Row[]>>;
+type Signals = { row: Row; vector: Hit["vector"]; bm25: Hit["bm25"]; fused: number };
+
+/** The app's own reciprocal rank fusion: Σ 1/(k + rank) over the lists a document appears in, ranks from 1. */
+function fuseInApp(lists: Lists): Map<string, Signals> {
+  const docs = new Map<string, Signals>();
+  for (const [name, rows] of Object.entries(lists) as ["vector" | "bm25", Row[]][]) {
+    rows.forEach((row, i) => {
+      const id = String(row.id);
+      const d = docs.get(id) ?? { row, vector: null, bm25: null, fused: 0 };
+      d[name] = { rank: i + 1, score: Number(row.$dist ?? 0), of: rows.length };
+      docs.set(id, d);
+    });
+  }
+  for (const d of docs.values()) d.fused = [d.vector, d.bm25].reduce((sum, sig) => sum + (sig ? 1 / (RRF_K + sig.rank) : 0), 0);
+  return docs;
+}
+
+const byFused = (docs: Map<string, Signals>) => [...docs.entries()].sort((a, b) => b[1].fused - a[1].fused);
+
+/**
+ * Compare turbopuffer's fused order with the app's. A position only counts as a mismatch when the documents differ AND
+ * their scores differ: equal RRF scores (e.g. #3 in vector only vs #3 in BM25 only) may come back in either order,
+ * since turbopuffer doesn't document its tie-break.
+ */
+function compareFusion(server: Row[], app: [string, Signals][], verifyMs: number): FusionCheck {
+  const EPS = 1e-9;
+  const appScore = new Map(app.map(([id, d]) => [id, d.fused]));
+  const n = Math.min(server.length, app.length);
+  let sameIds = 0, tieSwaps = 0, maxScoreDiff = 0;
+  let firstMismatch: FusionCheck["firstMismatch"] = null;
+  for (let i = 0; i < n; i++) {
+    const sid = String(server[i].id), aid = app[i][0];
+    const sScore = Number(server[i].$dist ?? 0);
+    const mine = appScore.get(sid);
+    if (mine !== undefined) maxScoreDiff = Math.max(maxScoreDiff, Math.abs(mine - sScore));
+    if (sid === aid) sameIds++;
+    else if (Math.abs(sScore - app[i][1].fused) < EPS) tieSwaps++;
+    else firstMismatch ??= { position: i + 1, server: sid, app: aid };
+  }
+  return { compared: n, sameIds, tieSwaps, maxScoreDiff, firstMismatch, verifyMs, matches: !firstMismatch && maxScoreDiff < 1e-6 };
+}
+
 async function searchNamespace(namespace: string, query: string, mode: Mode, filter: Filter | null, topK: number,
-  terms: string[]): Promise<NsResult> {
+  terms: string[], fusion: Fusion, verify: boolean): Promise<NsResult> {
   const kind = kindOf(namespace);
   const base: Record<string, unknown> = { top_k: topK, include_attributes: DISPLAY[kind] };
   if (filter) base.filters = filter;
   const vec = { ...base, rank_by: ["text", "ANN", ["Embed", query]] };
   const txt = { ...base, rank_by: ["text", "BM25", query] };
   const strip = (q: Record<string, unknown>) => Object.fromEntries(Object.entries(q).filter(([k]) => k !== "include_attributes"));
-  const request = mode === "vector" ? strip(vec) : mode === "bm25" ? strip(txt) : { queries: [strip(vec), strip(txt)] };
+  const serverFusion = mode === "hybrid" && fusion === "server";
+  // Server fusion: turbopuffer merges the two subqueries itself and returns one list of up to topK, scored in $dist.
+  const fusedReq = { queries: [vec, txt], rerank_by: ["RRF"], limit: topK };
+  const request = mode === "vector" ? strip(vec) : mode === "bm25" ? strip(txt)
+    : serverFusion ? { ...fusedReq, queries: [strip(vec), strip(txt)] } : { queries: [strip(vec), strip(txt)] };
 
   const t0 = performance.now();
-  let lists: Partial<Record<"vector" | "bm25", Row[]>> = {};
+  let lists: Lists = {};
+  let serverRows: Row[] | null = null;
   let perf: Record<string, unknown> = {};
+  let verifyMs = 0;
   try {
     const ns = tp().namespace(namespace);
     if (mode === "hybrid") {
-      // One request, two ranked lists back. Fused below with the same RRF formula turbopuffer's
-      // rerank_by ["RRF"] uses (k=60), so each result keeps its rank in both lists for the explainer.
-      const req = { queries: [vec, txt] };
+      const unfusedReq = { queries: [vec, txt] };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await tpCall("multi_query", namespace, req, () => ns.multiQuery(req as any), { label: "search" });
-      lists = { vector: res.results?.[0]?.rows ?? [], bm25: res.results?.[1]?.rows ?? [] };
-      perf = res.performance ?? {};
+      const unfused = (label: string): Promise<any> =>
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        tpCall("multi_query", namespace, unfusedReq, () => ns.multiQuery(unfusedReq as any), { label });
+      if (serverFusion) {
+        // The fused request gives the results. With verification, the two unfused lists come back in parallel, so the
+        // app can recompute RRF, check it against turbopuffer's, and show each result's rank in both lists.
+        const tv = performance.now();
+        const [fusedRes, raw] = await Promise.all([
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          tpCall("multi_query", namespace, fusedReq, () => ns.multiQuery(fusedReq as any), { label: "search" }) as Promise<any>,
+          verify ? unfused("search-verify").then((r) => { verifyMs = performance.now() - tv; return r; }) : Promise.resolve(null),
+        ]);
+        serverRows = fusedRes.results?.[0]?.rows ?? [];
+        perf = fusedRes.performance ?? {};
+        if (raw) lists = { vector: raw.results?.[0]?.rows ?? [], bm25: raw.results?.[1]?.rows ?? [] };
+      } else {
+        // App fusion: one request, two ranked lists back, fused below.
+        const res = await unfused("search");
+        lists = { vector: res.results?.[0]?.rows ?? [], bm25: res.results?.[1]?.rows ?? [] };
+        perf = res.performance ?? {};
+      }
     } else {
       const req = mode === "vector" ? vec : txt;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -144,29 +209,28 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
   }
   const roundMs = performance.now() - t0;
 
-  const docs = new Map<string, { row: Row; vector: Hit["vector"]; bm25: Hit["bm25"] }>();
-  for (const [name, rows] of Object.entries(lists) as ["vector" | "bm25", Row[]][]) {
-    rows.forEach((row, i) => {
-      const id = String(row.id);
-      const d = docs.get(id) ?? { row, vector: null, bm25: null };
-      d[name] = { rank: i + 1, score: Number(row.$dist ?? 0), of: rows.length };
-      docs.set(id, d);
-    });
-  }
-  const scored = [...docs.entries()].map(([id, d]) => {
-    const fused = [d.vector, d.bm25].reduce((sum, sig) => sum + (sig ? 1 / (RRF_K + sig.rank) : 0), 0);
-    return { id, ...d, fused };
-  });
-  scored.sort((a, b) => b.fused - a.fused);
+  const app = fuseInApp(lists);
+  const appOrder = byFused(app);
+  const check = serverRows && verify ? compareFusion(serverRows, appOrder.slice(0, topK), verifyMs) : null;
 
-  const hits = scored.slice(0, topK).map((d, i) => {
+  // The ranked list to show: turbopuffer's order with server fusion, otherwise the app's.
+  const ordered: { id: string; row: Row; fused: number; appFused: number | null; vector: Hit["vector"]; bm25: Hit["bm25"] }[] =
+    serverRows
+      ? serverRows.map((row) => {
+        const id = String(row.id);
+        const mine = app.get(id);
+        return { id, row, fused: Number(row.$dist ?? 0), appFused: mine?.fused ?? null, vector: mine?.vector ?? null, bm25: mine?.bm25 ?? null };
+      })
+      : appOrder.map(([id, d]) => ({ id, row: d.row, fused: d.fused, appFused: null, vector: d.vector, bm25: d.bm25 }));
+
+  const hits = ordered.slice(0, topK).map((d, i) => {
     const p = present(kind, d.row);
     const visible = `${p.title} ${p.body}`.toLowerCase();
     return {
       key: `${namespace}:${d.id}`, id: d.id, kind, namespace, title: p.title, url: p.url,
       meta: p.meta.filter(Boolean), code: p.code,
       snippet: p.body.length > 420 ? p.body.slice(0, 420) + "…" : p.body,
-      nsRank: i + 1, fused: d.fused, vector: d.vector, bm25: d.bm25,
+      nsRank: i + 1, fused: d.fused, appFused: d.appFused, vector: d.vector, bm25: d.bm25,
       terms: terms.filter((t) => new RegExp(`\\b${t.replace(/[-]/g, "\\-")}`).test(visible)),
       raw: d.row as Record<string, unknown>,
     };
@@ -180,23 +244,27 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
       serverMs: num("server_total_ms"), embeddingMs: num("embedding_ms"),
       cache: typeof perf.cache_temperature === "string" ? perf.cache_temperature : null,
       docs: num("approx_namespace_size"), filters: describeFilter(filter), request,
+      ...(mode === "hybrid" ? { fusion, check } : {}),
     },
   };
 }
 
 export async function search(targets: { namespace: string; filter: Filter | null }[], query: string, mode: Mode,
-  topK: number): Promise<SearchResponse> {
+  topK: number, opts: { fusion?: Fusion; verify?: boolean } = {}): Promise<SearchResponse> {
+  const fusion: Fusion = opts.fusion ?? "server";
+  const verify = opts.verify ?? config.fusionVerify;
   const terms = queryTerms(query);
   const t0 = performance.now();
-  const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms)));
+  const parts = await Promise.all(targets.map((t) => searchNamespace(t.namespace, query, mode, t.filter, topK, terms, fusion, verify)));
   const wallMs = performance.now() - t0;
 
-  // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order).
+  // Merge across namespaces by rank: each namespace's #1 ties, then #2, and so on (stable by target order). This step
+  // always runs in the app: a multi_query, and so turbopuffer's RRF, covers one namespace.
   const merged = parts.flatMap((p) => p.hits.map((h) => ({ ...h, rrf: 1 / (RRF_K + h.nsRank) })));
   merged.sort((a, b) => b.rrf - a.rrf);
   const hits: Hit[] = merged.map((h, i) => ({ ...h, overall: i + 1 }));
 
-  return { query, mode, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
+  return { query, mode, fusion, topK, rrfK: RRF_K, wallMs, embedModel: config.embedModel, runs: parts.map((p) => p.run), hits };
 }
 
 // ------------------------------------------------------------------ patients and notes
