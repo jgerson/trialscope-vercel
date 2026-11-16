@@ -40,34 +40,50 @@ function useVerification(data: SearchResponse, run: NamespaceRun | undefined, au
 }
 
 /** Where one search's time went, from your browser down to turbopuffer. */
+/**
+ * Where the time went for this search, as one sentence and one bar. Every number comes from the search itself (nothing
+ * is re-run): the browser's own clock (Search pressed to results drawn), the route's clock on the server, and the
+ * timing turbopuffer sends back with the slowest source's results (embedding and server time). With several sources,
+ * they run in parallel, so the slowest one decides the wait.
+ */
 function TimeBreakdown({ data, browserMs }: { data: SearchResponse; browserMs: number | null }) {
-  const tpuf = Math.max(0, ...data.runs.map((r) => r.serverMs ?? 0));
-  const route = data.server?.routeMs ?? null;
-  const rows: [string, string | null, string][] = [
-    ["In your browser", browserMs != null ? `${Math.round(browserMs)} ms` : null, "from pressing Search to the results on screen"],
-    ["App server", route != null ? `${route} ms` : null, data.server?.cold ? "a cold start: this instance's first request" : `warm instance, up ${data.server?.ageS ?? "?"} s`],
-    ["Search, all sources", `${Math.round(data.wallMs)} ms`, "turbopuffer requests in parallel, plus merging"],
-    ["turbopuffer server", `${tpuf} ms`, "slowest source, as turbopuffer reports it"],
-  ];
-  const outside = browserMs != null && route != null ? Math.max(0, Math.round(browserMs - route)) : null;
+  const slowest = [...data.runs].sort((a, b) => b.roundMs - a.roundMs)[0];
+  const server = slowest?.serverMs ?? 0;
+  const embed = Math.min(slowest?.embeddingMs ?? 0, server);
+  const search = Math.max(0, server - embed);
+  const route = data.server?.routeMs ?? Math.round(data.wallMs);
+  const app = Math.max(0, route - server);
+  const outside = browserMs != null ? Math.max(0, Math.round(browserMs - route)) : null;
+  const total = embed + search + app + (outside ?? 0);
+  const parts = [
+    { label: "turning your words into a vector", short: "Embedding", ms: embed, color: "bg-ink/55" },
+    { label: data.fusion === "rerank" && data.mode === "hybrid" ? "searching and reranking in turbopuffer" : "searching in turbopuffer",
+      short: data.fusion === "rerank" && data.mode === "hybrid" ? "Search + rerank" : "Search", ms: search, color: "bg-ink" },
+    { label: "in the app, including the trip to turbopuffer", short: "App", ms: app, color: "bg-line-2" },
+    ...(outside != null ? [{ label: "network and drawing the page", short: "Network + page", ms: outside, color: "bg-line" }] : []),
+  ].filter((x) => x.ms > 0);
+  const r = Math.round;
   return (
     <div className="mt-4 rounded-xl border border-line p-3">
-      <p className="text-[12.5px] font-semibold text-ink">Where the time went</p>
-      <table className="mt-1 w-full text-[12.5px]">
-        <tbody>
-          {rows.map(([label, value, note]) => (
-            <tr key={label}>
-              <td className="py-0.5 pr-2 text-ink-2">{label}</td>
-              <td className="py-0.5 pr-2 text-right font-semibold tabular-nums">{value ?? "–"}</td>
-              <td className="py-0.5 text-slate">{note}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {outside != null && (
-        <p className="mt-1 text-[12px] leading-relaxed text-slate">
-          {outside} ms happened outside the app server: the network between you and Vercel, Vercel&apos;s routing and sign-in
-          check, sending the results, and drawing them.
+      <p className="text-[13px] leading-relaxed text-ink-2">
+        <b className="text-[22px] font-bold tabular-nums text-ink">{r(total)} ms</b>{" "}
+        {outside != null ? "from pressing Search to results on screen" : "on the server"}:{" "}
+        {parts.map((x, i) => (
+          <span key={x.short}>{i > 0 && (i === parts.length - 1 ? ", and " : ", ")}<b className="tabular-nums">{r(x.ms)} ms</b> {x.label}</span>
+        ))}.
+      </p>
+      <div className="mt-2.5 flex h-3 w-full overflow-hidden rounded-full bg-paper" role="img"
+        aria-label={parts.map((x) => `${x.short} ${r(x.ms)} ms`).join(", ")}>
+        {parts.map((x) => <div key={x.short} className={x.color} style={{ width: `${(x.ms / Math.max(total, 1)) * 100}%` }} />)}
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-slate">
+        {parts.map((x) => (
+          <span key={x.short} className="inline-flex items-center gap-1.5"><span className={cx("h-2 w-2 rounded-full", x.color)} />{x.short} {r(x.ms)} ms</span>
+        ))}
+      </div>
+      {data.server?.cold && (
+        <p className="mt-2 text-[11.5px] leading-relaxed text-slate">
+          This was the server&apos;s first request after it started, so any start-up time is included in the app part.
         </p>
       )}
     </div>
@@ -88,12 +104,8 @@ export function RunOverview({ data, browserMs = null }: { data: SearchResponse; 
   return (
     <div className="animate-slide-in p-5">
       <h3 className="text-[15px] font-semibold text-ink">How turbopuffer ran this search</h3>
-      <div className="mt-4 flex items-baseline gap-2">
-        <span className="text-[34px] font-bold tracking-[-0.02em] tabular-nums">{Math.round(data.wallMs)} ms</span>
-        <span className="text-[13px] text-slate">{n} request{n > 1 ? "s" : ""} in parallel</span>
-      </div>
-      <p className="mt-1 text-[13px] leading-relaxed text-slate">{how}{n > 1 ? " Results from each source are then merged by rank." : ""}</p>
       <TimeBreakdown data={data} browserMs={browserMs} />
+      <p className="mt-3 text-[13px] leading-relaxed text-slate">{how}{n > 1 ? " The sources are searched in parallel, then merged by rank." : ""}</p>
       <div className="mt-4 divide-y divide-line">
         {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} query={data.query} data={data} />)}
       </div>

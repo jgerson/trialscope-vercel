@@ -253,10 +253,11 @@ npm run dev                  # http://localhost:3000
   turbopuffer's docs recommend at the start of a session (it's free when a namespace is already warm). A Count query
   alongside reports cache temperature, but only as a rough signal: it can read "hot" while the vector and full-text
   indexes a search reads are still cold. Logged as `{"warm":"done", ...}`.
-- **Timing you can trust**: Explain's **Where the time went** shows the search as you experienced it (pressing Search to
-  results painted, measured in the browser), the app server's own time (and whether this request was a cold start:
-  the instance's first), the search across sources, and turbopuffer's server time; the remainder is network,
-  Vercel's routing and sign-in check, and drawing the page. The results header shows the browser time too.
+- **Where the time went** (top of the Explain drawer): one sentence and one bar for the search you just ran, from
+  pressing Search to results on screen, split into embedding the query, searching in turbopuffer, the app (including
+  the trip to turbopuffer) and the network plus drawing the page. Nothing is re-run to get these: the numbers come from
+  the browser's clock, the route's clock and the timing turbopuffer returns with the slowest source's results. The
+  checks below it (RRF, query plan, ANN accuracy) do run new queries and show their own timings.
 - **Langfuse loads lazily**: the exporter and OpenTelemetry SDK (about 55–70 ms of a cold start) are imported in the
   background instead of at startup. The warm-up waits for them; a request that reaches a cold instance before they've
   loaded runs untraced (its log line is still written).
