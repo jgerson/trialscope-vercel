@@ -245,8 +245,10 @@ npm run dev                  # http://localhost:3000
   so. Settings live in the URL (`?rk=recruiting2.recent2-2020-4`). `BOOST_BM25_MIDPOINT` changes the BM25 midpoint.
 - **Warm-up before searching**: focusing the search box (and loading the page without a query) calls `/api/warm`, at
   most once a minute per tab. It starts the function instance if it's cold, waits for Langfuse's exporter to load,
-  opens the connection to turbopuffer, and checks `ts-trials` and `ts-pubmed` with a tiny eventual Count query,
-  sending `hintCacheWarm` if either isn't in cache. Logged as `{"warm":"done", ...}`.
+  opens the connection to turbopuffer, and sends `hint_cache_warm` to `ts-trials` and `ts-pubmed` every time, as
+  turbopuffer's docs recommend at the start of a session (it's free when a namespace is already warm). A Count query
+  alongside reports cache temperature, but only as a rough signal: it can read "hot" while the vector and full-text
+  indexes a search reads are still cold. Logged as `{"warm":"done", ...}`.
 - **Timing you can trust**: Explain's **Where the time went** shows the search as you experienced it (pressing Search to
   results painted, measured in the browser), the app server's own time (and whether this request was a cold start:
   the instance's first), the search across sources, and turbopuffer's server time; the remainder is network,
