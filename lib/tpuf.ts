@@ -685,21 +685,25 @@ export async function patientCache(patientId: string, warm: boolean): Promise<Ca
 }
 
 /**
- * Cache state of any namespace, from a tiny eventual Count query (it doesn't wait on object storage). If it isn't
- * hot or warm and `warm` is set, ask turbopuffer to start loading it into cache.
+ * Cache state of any namespace, from a tiny eventual Count query (it doesn't wait on object storage). With `warm`
+ * set, also send turbopuffer's cache-warm hint, every time.
  */
 export async function namespaceCache(namespace: string, warm: boolean, label = "cache-check"): Promise<CacheState> {
   const ns = tp().namespace(namespace);
   const req = { aggregate_by: { c: ["Count"] }, consistency: { level: "eventual" } };
   const t0 = performance.now();
+  // When warming, send turbopuffer's hint every time instead of only when the check looks cold. turbopuffer's docs
+  // recommend hinting a user's namespaces at the start of a session, and the hint is free when the namespace is already
+  // warm or warming. A Count query's cache temperature also doesn't show whether the vector and full-text indexes a
+  // search reads are cached: it can read "hot" while the next search is cold.
+  const hint = warm ? tpCall("warm", namespace, {}, () => ns.hintCacheWarm(), { label: "hint-cache-warm" }) : null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label });
+  if (hint) await hint;
   const temperature = typeof res.performance?.cache_temperature === "string" ? res.performance.cache_temperature : null;
   const ms = Math.round(performance.now() - t0);
   if (temperature === "hot" || temperature === "warm") return { state: "warm", temperature, ms };
-  if (!warm) return { state: "cold", temperature, ms };
-  await tpCall("warm", namespace, {}, () => ns.hintCacheWarm(), { label: "hint-cache-warm" });
-  return { state: "warming", temperature, ms };
+  return { state: warm ? "warming" : "cold", temperature, ms };
 }
 
 /**
