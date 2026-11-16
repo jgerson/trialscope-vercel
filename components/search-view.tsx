@@ -664,7 +664,7 @@ function FacetPanel({ data, loading, refine, toggle, patient, onClose }: {
               const shown = open ? f.values : [...f.values.slice(0, FACET_PREVIEW), ...f.values.slice(FACET_PREVIEW).filter((v) => v.selected)];
               const more = f.values.length - shown.length;
               return (
-                <fieldset key={f.key}>
+                <fieldset key={f.key} className="min-w-0">{/* a fieldset defaults to min-width: min-content, which lets long labels widen the panel */}
                   <Tip align="left" text={f.hint}><legend className="mb-1 text-[13px] font-semibold text-ink">{f.label}</legend></Tip>
                   {f.error && <p className="text-[12px] text-amber-800">Couldn&apos;t count this facet.</p>}
                   <ul className="space-y-0.5">
