@@ -217,9 +217,12 @@ npm run dev                  # http://localhost:3000
   - **In app**: turbopuffer returns the two lists and the app fuses them, as before.
 - **Vector: Approximate | Exact** picks how the vector subquery runs: `["text", "ANN", ["Embed", q]]` (the index,
   fast, ~90–95% recall) or `["text", "kNN", ["Embed", q]]` (every document that passes the filters, always the true
-  nearest neighbors). If kNN is rejected it falls back to ANN and says so. In Explain, **Check ANN accuracy** asks
-  turbopuffer's recall endpoint for this query's recall (`rank_by` + filters, `num: 1`) and for a 20-search sample of
-  the namespace, and times the same vector query both ways, listing anything only exact search found. The copilot can
+  nearest neighbors). turbopuffer runs kNN only with filters ("to bound the search space"), so exact search needs a
+  Refine filter; without one, or if kNN is rejected, the search runs ANN and says so. In Explain, **Check ANN accuracy**
+  runs this query both ways (with its filters) and reports the share of the exact top K that ANN also found, the
+  server time of each, and anything only exact search found; without filters it says why it can't. It also asks
+  turbopuffer's recall endpoint for a 20-search sample of the namespace. (The recall endpoint can't score this query
+  itself: it takes raw query vectors, and these searches send text for turbopuffer to embed.) The copilot can
   set `exact_vector`.
 - **Model rerank** (a third **Fused by** option, and the copilot's `rerank: true`): the same multi-query with
   `rerank_by: { model, attribute: "text", query }` instead of RRF. Each subquery returns 20/30/40 candidates (with
