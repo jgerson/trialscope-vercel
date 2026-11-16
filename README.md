@@ -243,6 +243,17 @@ npm run dev                  # http://localhost:3000
   boosted keyword list with it as usual. `compute_attributes` returns each part per result for the Explain panel. If
   turbopuffer rejects a boosted request (400), the search retries without the breakdown, then as plain BM25, and says
   so. Settings live in the URL (`?rk=recruiting2.recent2-2020-4`). `BOOST_BM25_MIDPOINT` changes the BM25 midpoint.
+- **Warm-up before searching**: focusing the search box (and loading the page without a query) calls `/api/warm`, at
+  most once a minute per tab. It starts the function instance if it's cold, waits for Langfuse's exporter to load,
+  opens the connection to turbopuffer, and checks `ts-trials` and `ts-pubmed` with a tiny eventual Count query,
+  sending `hintCacheWarm` if either isn't in cache. Logged as `{"warm":"done", ...}`.
+- **Timing you can trust**: Explain's **Where the time went** shows the search as you experienced it (pressing Search to
+  results painted, measured in the browser), the app server's own time (and whether this request was a cold start:
+  the instance's first), the search across sources, and turbopuffer's server time; the remainder is network,
+  Vercel's routing and sign-in check, and drawing the page. The results header shows the browser time too.
+- **Langfuse loads lazily**: the exporter and OpenTelemetry SDK (about 55–70 ms of a cold start) are imported in the
+  background instead of at startup. The warm-up waits for them; a request that reaches a cold instance before they've
+  loaded runs untraced (its log line is still written).
 - **Several sources** are queried in parallel and merged by rank. That merge always runs in the
   app, because a multi-query (and so turbopuffer's RRF) covers one namespace.
 - **Several sources** are queried in parallel and merged by rank.

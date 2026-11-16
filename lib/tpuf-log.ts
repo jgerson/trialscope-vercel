@@ -13,7 +13,7 @@
 import "server-only";
 import { after } from "next/server";
 import { getActiveTraceId, startActiveObservation } from "@langfuse/tracing";
-import { langfuseEnabled } from "./langfuse-setup";
+import { langfuseEnabled, langfuseReady } from "./langfuse-setup";
 import { flushLangfuse, insideTrace, newTrace } from "./langfuse";
 
 export type TpufOp = "query" | "multi_query" | "write" | "metadata" | "warm" | "explain";
@@ -76,7 +76,8 @@ export async function tpCall<T>(op: TpufOp, namespace: string, request: Record<s
     }
   };
 
-  if (!langfuseEnabled) return exec();
+  // Until the exporter has loaded (a cold instance's first moments), calls run untraced; the log line is still written.
+  if (!langfuseEnabled || !langfuseReady()) return exec();
   const traced = insideTrace();
   if (!traced && !tracePageLoads) return exec();
 
