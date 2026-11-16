@@ -1,7 +1,7 @@
 "use client";
 // The right-hand panel: how the search ran, or why one result ranked where it did.
 import { useEffect, useState } from "react";
-import { ArrowUpRight, X } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, X } from "lucide-react";
 import type { Accuracy, FusionCheck, Hit, NamespaceRun, SearchResponse, Verification } from "@/lib/types";
 import { cx, SourceTag } from "./ui";
 
@@ -383,7 +383,7 @@ export function HitExplainer({ hit: shown, data, onClose, closeLabel = "Back to 
           <SourceTag kind={hit.kind} />
           <h3 className="mt-1 text-[15px] font-semibold leading-snug text-ink">{hit.title}</h3>
         </div>
-        <button onClick={onClose} aria-label={closeLabel} className="rounded-lg bg-paper p-1.5 text-slate hover:text-ink"><X size={16} /></button>
+        <button onClick={onClose} aria-label={closeLabel} title={closeLabel} className="rounded-lg bg-paper p-1.5 text-slate hover:text-ink">{closeLabel.startsWith("Back") ? <ArrowLeft size={16} /> : <X size={16} />}</button>
       </div>
 
       <div className="mt-4 flex items-baseline gap-2">
