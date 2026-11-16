@@ -89,14 +89,14 @@ export interface NamespaceRun {
   diversify?: { attribute: string; per: number } | null;
 }
 
-/** ANN accuracy for one namespace, from turbopuffer's recall endpoint plus a timed ANN vs exact comparison. */
+/** ANN accuracy for one namespace: a timed ANN vs exact comparison of this query, plus turbopuffer's recall endpoint. */
 export interface Accuracy {
   namespace: string;
   topK: number;
-  thisQuery: { recall: number; annCount: number; exhaustiveCount: number } | { error: string };
   sampled: { recall: number; searches: number } | { error: string };
+  /** This query run with ANN and with exact kNN; `overlap` is its recall. Skipped without filters (kNN needs them). */
   timing: { annServerMs: number | null; knnServerMs: number | null; annRoundMs: number; knnRoundMs: number; overlap: number;
-    onlyExact: string[]; onlyAnn: string[] } | { error: string };
+    onlyExact: string[]; onlyAnn: string[] } | { error: string } | { skipped: string };
 }
 
 /** What model reranking did on one namespace. */

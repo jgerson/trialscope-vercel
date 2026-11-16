@@ -175,6 +175,10 @@ async function searchNamespace(namespace: string, query: string, mode: Mode, fil
   // passes the filters. If turbopuffer rejects kNN here (400), the search falls back to ANN and says so.
   let vecMethod: "ann" | "knn" = extra.exact && mode !== "bm25" ? "knn" : "ann";
   let vecError: string | null = null;
+  if (vecMethod === "knn" && !filter) {
+    vecMethod = "ann";
+    vecError = `${KNN_NEEDS_FILTER.replace(" to compare this query with exact search", " to search exactly")} Ran approximate (ANN) instead.`;
+  }
   const vecFor = (m: "ann" | "knn") => ({ ...base, rank_by: ["text", m === "knn" ? "kNN" : "ANN", ["Embed", query]] });
   let vec = vecFor(vecMethod);
   // The keyword subquery: plain BM25, or BM25 plus the requested boosts (see lib/ranking.ts). The reranker rescores
@@ -422,30 +426,34 @@ export async function verifyFusion(namespace: string, queries: Record<string, un
 // ------------------------------------------------------------------ ANN accuracy
 
 /**
- * How accurate was the approximate vector search for this query? Three independent checks, each allowed to fail alone:
- * - turbopuffer's recall endpoint for this exact rank_by + filters (num 1): it runs ANN and an exhaustive search itself;
- * - the recall endpoint on 20 searches with random vectors sampled from the namespace (a namespace-level figure);
- * - the same vector query run both ways here, timed, with the documents only one of them returned.
+ * Why there's no exact comparison without filters. turbopuffer's docs: "kNN queries require filters to be specified to
+ * bound the search space"; without filters, use ANN.
+ */
+export const KNN_NEEDS_FILTER = "turbopuffer runs exact (kNN) search only over a filtered subset, to bound how many "
+  + "documents it compares. Add a Refine filter (Status or Year, say) to compare this query with exact search.";
+
+/**
+ * How accurate was the approximate vector search for this query? Two checks, each allowed to fail alone:
+ * - this query run both ways (ANN and exact kNN), timed: the share of the exact top K that ANN also found is this
+ *   query's recall. Needs filters (see KNN_NEEDS_FILTER). turbopuffer's recall endpoint can't do this one: it takes raw
+ *   query vectors, and these searches send text for turbopuffer to embed;
+ * - turbopuffer's recall endpoint on 20 searches with vectors sampled from the namespace (a namespace-level figure).
  */
 export async function accuracy(namespace: string, query: string, filters: Filter | null, topK: number): Promise<Accuracy> {
   const ns = tp().namespace(namespace);
   const f = filters ? { filters } : {};
   const err = (e: unknown) => ({ error: String((e as Error)?.message ?? e).slice(0, 240) });
-  const rank = (m: "ANN" | "kNN") => ["text", m, ["Embed", query]];
   const timed = async (m: "ANN" | "kNN") => {
-    const req = { rank_by: rank(m), top_k: topK, ...f };
+    const req = { rank_by: ["text", m, ["Embed", query]], top_k: topK, ...f };
     const t0 = performance.now();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: `accuracy-${m.toLowerCase()}` });
     return { ids: ((res.rows ?? []) as Row[]).map((r) => String(r.id)), serverMs: num(res.performance?.server_total_ms), roundMs: performance.now() - t0 };
   };
-  const [thisQuery, sampled, timing] = await Promise.all([
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ns.recall({ rank_by: rank("ANN"), top_k: topK, num: 1, ...f } as any)
-      .then((r) => ({ recall: r.avg_recall, annCount: r.avg_ann_count, exhaustiveCount: r.avg_exhaustive_count }), err),
+  const [sampled, timing] = await Promise.all([
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ns.recall({ num: 20, top_k: topK, ...f } as any).then((r) => ({ recall: r.avg_recall, searches: 20 }), err),
-    Promise.all([timed("ANN"), timed("kNN")]).then(([a, k]) => {
+    !filters ? Promise.resolve({ skipped: KNN_NEEDS_FILTER }) : Promise.all([timed("ANN"), timed("kNN")]).then(([a, k]) => {
       const exact = new Set(k.ids);
       const approx = new Set(a.ids);
       return {
@@ -455,7 +463,7 @@ export async function accuracy(namespace: string, query: string, filters: Filter
       };
     }, err),
   ]);
-  return { namespace, topK, thisQuery, sampled, timing };
+  return { namespace, topK, sampled, timing };
 }
 
 const num = (v: unknown) => (typeof v === "number" ? v : null);

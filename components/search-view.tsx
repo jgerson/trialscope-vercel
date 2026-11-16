@@ -264,8 +264,8 @@ export function SearchView() {
       {error && <p className="mt-8 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</p>}
 
       {q && (
-        <div className="mt-8 grid items-start gap-6 lg:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[230px_minmax(0,1fr)_400px]">
-          <div className={cx(!facetsOpen && "max-lg:hidden")}>
+        <div className="mt-8 grid items-start gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-x-10 xl:grid-cols-[240px_minmax(0,1fr)_400px]">
+          <div className={cx("min-w-0", !facetsOpen && "max-lg:hidden")}>
             <FacetPanel data={facetData} loading={facetsLoading} refine={refine} toggle={toggleRefine} patient={patient}
               onClose={() => setFacetsOpen(false)} />
           </div>
@@ -645,7 +645,7 @@ function FacetPanel({ data, loading, refine, toggle, patient, onClose }: {
   }
   if (!data.length) return null;
   return (
-    <nav aria-label="Refine results" className={cx("space-y-5 transition-opacity", loading && "opacity-60")}>
+    <nav aria-label="Refine results" className={cx("min-w-0 space-y-5 transition-opacity", loading && "opacity-60")}>
       <div className="flex items-center justify-between lg:hidden">
         <span className="text-[14px] font-semibold text-ink">Refine</span>
         <button type="button" onClick={onClose} aria-label="Close refinements" className="rounded-lg bg-paper p-1.5 text-slate"><X size={16} /></button>
@@ -670,14 +670,14 @@ function FacetPanel({ data, loading, refine, toggle, patient, onClose }: {
                   <ul className="space-y-0.5">
                     {shown.map((v) => (
                       <li key={v.value}>
-                        <label className={cx("flex cursor-pointer items-baseline gap-2 rounded-md px-1 py-0.5 text-[13px] hover:bg-paper",
+                        <label className={cx("flex min-w-0 cursor-pointer items-baseline gap-2 rounded-md px-1 py-0.5 text-[13px] hover:bg-paper",
                           !v.count && !v.selected && "opacity-45")}>
                           <input type="checkbox" checked={v.selected} disabled={!v.count && !v.selected}
-                            onChange={() => toggle(f.key, v.value)} className="translate-y-[1px] accent-[var(--color-accent)]" />
+                            onChange={() => toggle(f.key, v.value)} className="shrink-0 translate-y-[1px] accent-[var(--color-accent)]" />
                           <span className={cx("min-w-0 flex-1 truncate", v.selected ? "font-medium text-ink" : "text-ink-2")} title={v.label}>
                             {f.key === "patientFit" ? valueLabel(facetDef(f.key)!, v.value, patient) : v.label}
                           </span>
-                          <span className="tabular-nums text-[12px] text-slate">{v.count.toLocaleString()}</span>
+                          <span className="shrink-0 pl-2 tabular-nums text-[12px] text-slate">{v.count.toLocaleString()}</span>
                         </label>
                       </li>
                     ))}

@@ -186,16 +186,18 @@ function AnnAccuracy({ run, query }: { run: NamespaceRun; query: string }) {
   return (
     <div className="mt-2 space-y-1.5 rounded-lg border border-line p-3 text-[12.5px] leading-relaxed">
       <p className="font-semibold text-ink">ANN accuracy, top {out.topK}</p>
-      <p className="text-ink-2">
-        This query: {failed(out.thisQuery) ? <span className="text-slate">recall endpoint unavailable ({out.thisQuery.error})</span>
-          : <><b className="tabular-nums">{pct(out.thisQuery.recall)}</b> of the true nearest neighbors found by ANN (turbopuffer recall endpoint)</>}
-      </p>
-      <p className="text-ink-2">
-        Namespace sample: {failed(out.sampled) ? <span className="text-slate">unavailable ({out.sampled.error})</span>
-          : <><b className="tabular-nums">{pct(out.sampled.recall)}</b> average recall over {out.sampled.searches} random searches</>}
-      </p>
-      {failed(out.timing) ? <p className="text-slate">Timing comparison unavailable ({out.timing.error})</p> : (
+      {"skipped" in out.timing ? (
+        <p className="text-ink-2">This query: <span className="text-slate">{out.timing.skipped}</span></p>
+      ) : failed(out.timing) ? (
+        <p className="text-ink-2">This query: <span className="text-slate">exact comparison unavailable ({out.timing.error})</span></p>
+      ) : (
         <>
+          <p className="text-ink-2">
+            This query: <b className="tabular-nums">{pct(out.timing.overlap)}</b> of the exact top {out.topK} also found by ANN
+            {out.timing.onlyExact.length
+              ? <span className="text-slate"> (missed {out.timing.onlyExact.slice(0, 5).join(", ")}{out.timing.onlyExact.length > 5 ? "…" : ""})</span>
+              : null}
+          </p>
           <table className="mt-1 w-full">
             <thead><tr className="text-slate"><th className="text-left font-normal" /><th className="text-right font-normal">server</th><th className="text-right font-normal">round trip</th></tr></thead>
             <tbody>
@@ -203,12 +205,12 @@ function AnnAccuracy({ run, query }: { run: NamespaceRun; query: string }) {
               <tr><td className="text-ink-2">Exact (kNN)</td><td className="text-right tabular-nums">{out.timing.knnServerMs ?? "–"} ms</td><td className="text-right tabular-nums text-slate">{Math.round(out.timing.knnRoundMs)} ms</td></tr>
             </tbody>
           </table>
-          <p className="text-slate">
-            Same top {out.topK} from both: {pct(out.timing.overlap)}.
-            {out.timing.onlyExact.length ? ` Only exact found: ${out.timing.onlyExact.slice(0, 5).join(", ")}${out.timing.onlyExact.length > 5 ? "…" : ""}.` : " ANN missed nothing."}
-          </p>
         </>
       )}
+      <p className="text-ink-2">
+        Namespace sample: {failed(out.sampled) ? <span className="text-slate">unavailable ({out.sampled.error})</span>
+          : <><b className="tabular-nums">{pct(out.sampled.recall)}</b> average recall over {out.sampled.searches} random searches (turbopuffer recall endpoint)</>}
+      </p>
     </div>
   );
 }
