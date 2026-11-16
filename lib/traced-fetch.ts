@@ -7,11 +7,11 @@
 // Never recorded: bodies, query strings or headers (they can hold keys and patient text).
 import "server-only";
 import { startObservation } from "@langfuse/tracing";
-import { langfuseEnabled } from "./langfuse-setup";
+import { langfuseEnabled, langfuseReady } from "./langfuse-setup";
 import { insideTrace } from "./langfuse";
 
 export const tracedFetch: typeof fetch = async (input, init) => {
-  if (!langfuseEnabled || !insideTrace()) return fetch(input, init);
+  if (!langfuseEnabled || !langfuseReady() || !insideTrace()) return fetch(input, init);
   let url: URL;
   try {
     url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);

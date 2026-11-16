@@ -678,13 +678,22 @@ const withFilters = (f: Filter | null) => (f ? { filters: f } : {});
  * Cache state of a patient's namespace, read from a tiny count query (eventual consistency, so it doesn't wait on object
  * storage). If it isn't warm and `warm` is set, ask turbopuffer to start loading it into cache.
  */
-export async function patientCache(patientId: string, warm: boolean): Promise<{ state: "warm" | "warming" | "cold"; temperature: string | null; ms: number }> {
-  const namespace = NS.patient(patientId);
+export type CacheState = { state: "warm" | "warming" | "cold"; temperature: string | null; ms: number };
+
+export async function patientCache(patientId: string, warm: boolean): Promise<CacheState> {
+  return namespaceCache(NS.patient(patientId), warm);
+}
+
+/**
+ * Cache state of any namespace, from a tiny eventual Count query (it doesn't wait on object storage). If it isn't
+ * hot or warm and `warm` is set, ask turbopuffer to start loading it into cache.
+ */
+export async function namespaceCache(namespace: string, warm: boolean, label = "cache-check"): Promise<CacheState> {
   const ns = tp().namespace(namespace);
   const req = { aggregate_by: { c: ["Count"] }, consistency: { level: "eventual" } };
   const t0 = performance.now();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label: "cache-check" });
+  const res: any = await tpCall("query", namespace, req, () => ns.query(req as any), { label });
   const temperature = typeof res.performance?.cache_temperature === "string" ? res.performance.cache_temperature : null;
   const ms = Math.round(performance.now() - t0);
   if (temperature === "hot" || temperature === "warm") return { state: "warm", temperature, ms };

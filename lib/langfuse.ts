@@ -16,7 +16,7 @@ export { flushLangfuse } from "./langfuse-setup";
  * metadata applied to every observation created inside it.
  */
 export function newTrace<T>(attributes: PropagateAttributesParams, fn: () => T): T {
-  ensureLangfuse();
+  void ensureLangfuse(); // starts the background load if needed; a request that arrives before it finishes goes untraced
   return tracing.run(true, () => context.with(ROOT_CONTEXT, () => propagateAttributes(attributes, fn)));
 }
 

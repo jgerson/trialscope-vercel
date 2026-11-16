@@ -7,6 +7,7 @@ import type { CorpusStat, Fusion, Hit, Mode, Patient, SearchResponse, Source } f
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
 import { HitExplainer, RunOverview } from "./explain";
+import { warmUp } from "@/lib/use-warmup";
 import { DIVERSIFIABLE, GROUPS, groupHits, parseDiversify, type GroupKey } from "@/lib/grouping";
 import { facetDef, refineCount, refineFromParam, refineToParam, valueLabel, type FacetKey, type Refine,
   type SourceFacets } from "@/lib/facets";
@@ -79,6 +80,9 @@ export function SearchView() {
   const [topK, setTopK] = useState(() => Math.min(30, Math.max(5, Number(params.get("k")) || 10)));
   const [facetsOpen, setFacetsOpen] = useState(false); // below lg the panel opens from a Refine button
   const [data, setData] = useState<SearchResponse | null>(null);
+  // Browser timing: from pressing Search to the results being painted (set after the next frame).
+  const [browserMs, setBrowserMs] = useState<number | null>(null);
+  const searchStart = useRef<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -91,6 +95,7 @@ export function SearchView() {
   const run = useCallback(async (query: string) => {
     if (!query.trim()) { setData(null); return; }
     setLoading(true); setError(null);
+    searchStart.current = performance.now();
     try {
       const res = await fetch("/api/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -108,6 +113,17 @@ export function SearchView() {
       setLoading(false);
     }
   }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, vectorMethod, refineKey, topK, patient?.id]);
+
+  // Once new results are on screen, record how long the whole search took as you experienced it.
+  useEffect(() => {
+    if (!data || searchStart.current == null) return;
+    const t0 = searchStart.current;
+    searchStart.current = null;
+    requestAnimationFrame(() => requestAnimationFrame(() => setBrowserMs(performance.now() - t0)));
+  }, [data]);
+
+  // Warm the server and turbopuffer on page load, unless a search is about to run anyway (see lib/use-warmup.ts).
+  useEffect(() => { if (!params.get("q")) warmUp(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-run whenever the query in the URL or any control changes.
   useEffect(() => { setInput(q); run(q); }, [q, run]);
@@ -187,7 +203,7 @@ export function SearchView() {
 
         <form onSubmit={(e) => { e.preventDefault(); submit(input); }} className="group relative max-w-[980px]">
           <Search className="pointer-events-none absolute top-1/2 left-5 -translate-y-1/2 text-slate" size={20} />
-          <input value={input} onChange={(e) => setInput(e.target.value)} aria-label="Search"
+          <input value={input} onChange={(e) => setInput(e.target.value)} onFocus={warmUp} aria-label="Search"
             placeholder={area === "notes" ? `Search ${patient ? `${patient.name}'s` : "a patient's"} notes` : "A drug, a gene, a trial ID or a clinical question"}
             className="h-[60px] w-full rounded-2xl border border-line bg-surface pr-28 pl-14 text-[17px] text-ink transition placeholder:text-slate/70 focus:border-ink focus:ring-4 focus:ring-ink/5 focus:outline-none" />
           <button type="submit" className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded-xl bg-ink px-4 py-2.5 text-[14px] font-semibold text-white hover:bg-ink-2">
@@ -258,6 +274,8 @@ export function SearchView() {
               <h2 className="font-display text-[32px] leading-none tracking-tight">{data ? `${data.hits.length} results` : "Searching"}</h2>
               {data && <span className="text-[13.5px] text-slate">
                 {MODES.find((m) => m.value === data.mode)?.label}{data.mode === "hybrid" ? ` (${data.fusion === "rerank" ? "model reranked" : `fused ${data.fusion === "server" ? "on turbopuffer" : "in app"}`})` : ""} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
+                {browserMs != null && ` · ${Math.round(browserMs)} ms in your browser`}
+                {data.server?.cold && " · cold start"}
               </span>}
               <button type="button" onClick={() => setFacetsOpen(!facetsOpen)} aria-expanded={facetsOpen}
                 className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-2 lg:hidden">
@@ -299,7 +317,7 @@ export function SearchView() {
               className={cx("rounded-2xl border border-line bg-surface xl:sticky xl:top-6 xl:max-h-[calc(100dvh-48px)] xl:overflow-y-auto",
                 "max-xl:fixed max-xl:inset-x-3 max-xl:bottom-3 max-xl:z-40 max-xl:max-h-[72dvh] max-xl:overflow-y-auto max-xl:shadow-pop",
                 !hit && "max-xl:hidden")}>
-              {hit ? <HitExplainer hit={hit} data={data} onClose={() => setSelected(null)} /> : <RunOverview data={data} />}
+              {hit ? <HitExplainer hit={hit} data={data} onClose={() => setSelected(null)} /> : <RunOverview data={data} browserMs={browserMs} />}
             </aside>
           )}
         </div>

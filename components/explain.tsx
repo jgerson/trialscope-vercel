@@ -39,7 +39,42 @@ function useVerification(data: SearchResponse, run: NamespaceRun | undefined, au
   return { ...state, lazy, load };
 }
 
-export function RunOverview({ data }: { data: SearchResponse }) {
+/** Where one search's time went, from your browser down to turbopuffer. */
+function TimeBreakdown({ data, browserMs }: { data: SearchResponse; browserMs: number | null }) {
+  const tpuf = Math.max(0, ...data.runs.map((r) => r.serverMs ?? 0));
+  const route = data.server?.routeMs ?? null;
+  const rows: [string, string | null, string][] = [
+    ["In your browser", browserMs != null ? `${Math.round(browserMs)} ms` : null, "from pressing Search to the results on screen"],
+    ["App server", route != null ? `${route} ms` : null, data.server?.cold ? "a cold start: this instance's first request" : `warm instance, up ${data.server?.ageS ?? "?"} s`],
+    ["Search, all sources", `${Math.round(data.wallMs)} ms`, "turbopuffer requests in parallel, plus merging"],
+    ["turbopuffer server", `${tpuf} ms`, "slowest source, as turbopuffer reports it"],
+  ];
+  const outside = browserMs != null && route != null ? Math.max(0, Math.round(browserMs - route)) : null;
+  return (
+    <div className="mt-4 rounded-xl border border-line p-3">
+      <p className="text-[12.5px] font-semibold text-ink">Where the time went</p>
+      <table className="mt-1 w-full text-[12.5px]">
+        <tbody>
+          {rows.map(([label, value, note]) => (
+            <tr key={label}>
+              <td className="py-0.5 pr-2 text-ink-2">{label}</td>
+              <td className="py-0.5 pr-2 text-right font-semibold tabular-nums">{value ?? "–"}</td>
+              <td className="py-0.5 text-slate">{note}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {outside != null && (
+        <p className="mt-1 text-[12px] leading-relaxed text-slate">
+          {outside} ms happened outside the app server: the network between you and Vercel, Vercel&apos;s routing and sign-in
+          check, sending the results, and drawing them.
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function RunOverview({ data, browserMs = null }: { data: SearchResponse; browserMs?: number | null }) {
   const n = data.runs.length;
   const how = {
     hybrid: data.fusion === "rerank"
@@ -58,6 +93,7 @@ export function RunOverview({ data }: { data: SearchResponse }) {
         <span className="text-[13px] text-slate">{n} request{n > 1 ? "s" : ""} in parallel</span>
       </div>
       <p className="mt-1 text-[13px] leading-relaxed text-slate">{how}{n > 1 ? " Results from each source are then merged by rank." : ""}</p>
+      <TimeBreakdown data={data} browserMs={browserMs} />
       <div className="mt-4 divide-y divide-line">
         {data.runs.map((r) => <RunRow key={r.namespace} run={r} mode={data.mode} query={data.query} data={data} />)}
       </div>

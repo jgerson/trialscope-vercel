@@ -186,6 +186,13 @@ export interface SearchResponse {
   embedModel: string;
   runs: NamespaceRun[];
   hits: Hit[];
+  /** How the app server handled this request: whether it was a cold start, and the route's own time. */
+  server?: { cold: boolean; ageS: number; routeMs: number };
+}
+
+/** Browser-side timing for one search, measured from pressing Search to the results being on screen. */
+export interface ClientTiming {
+  browserMs: number;
 }
 
 export const KIND_LABEL: Record<Kind, string> = {

@@ -9,10 +9,13 @@ import { parseDiversify } from "@/lib/grouping";
 import { cleanRefine } from "@/lib/facets";
 import type { Fusion, Mode, SearchFilters, Source } from "@/lib/types";
 import { requireUserId } from "@/lib/session";
+import { instanceInfo } from "@/lib/instance";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const t0 = performance.now();
+  const instance = instanceInfo();
   const user = await requireUserId();
   if (user instanceof Response) return user;
   const body = (await req.json()) as {
@@ -60,8 +63,9 @@ export async function POST(req: Request) {
         return out;
       }, { asType: "chain" }));
     console.log(JSON.stringify({ search: "done", sources, mode, fusion, boosts, topK, namespaces: targets.length,
-      hits: res.hits.length, wallMs: Math.round(res.wallMs) }));
-    return NextResponse.json(res);
+      hits: res.hits.length, wallMs: Math.round(res.wallMs), cold: instance.cold, routeMs: Math.round(performance.now() - t0) }));
+    const routeMs = Math.round(performance.now() - t0);
+    return NextResponse.json({ ...res, server: { cold: instance.cold, ageS: instance.ageS, routeMs } });
   } catch (e) {
     return NextResponse.json({ error: `turbopuffer request failed: ${(e as Error).message}` }, { status: 502 });
   }
