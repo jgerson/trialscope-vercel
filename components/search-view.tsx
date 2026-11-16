@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Filter, Info, Loader2, Search, Settings2, X } from "lucide-react";
+import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Filter, Gauge, Info, Loader2, Search, Settings2, X } from "lucide-react";
 import type { CorpusStat, Fusion, Hit, Mode, Patient, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
@@ -86,6 +86,8 @@ export function SearchView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // The Explain drawer: open on "How it ran" (the search overview) or on a result's Explain (that result).
+  const [overviewOpen, setOverviewOpen] = useState(false);
   const [facetData, setFacetData] = useState<SourceFacets[]>([]);
   const [facetsLoading, setFacetsLoading] = useState(false);
   const q = params.get("q") ?? "";
@@ -181,6 +183,14 @@ export function SearchView() {
   });
 
   const hit = data?.hits.find((h) => h.key === selected) ?? null;
+  const drawerOpen = !!data && (overviewOpen || hit != null);
+  const closeDrawer = useCallback(() => { setOverviewOpen(false); setSelected(null); }, []);
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDrawer(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen, closeDrawer]);
   const activeRefinements = refineCount(refine, sources);
 
   const notesLabel = patient ? `${patient.name.split(" ")[0]}'s notes` : "Patient notes";
@@ -264,7 +274,7 @@ export function SearchView() {
       {error && <p className="mt-8 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</p>}
 
       {q && (
-        <div className="mt-8 grid items-start gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-x-10 xl:grid-cols-[240px_minmax(0,1fr)_400px]">
+        <div className="mt-8 grid items-start gap-6 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-x-10">
           <div className={cx("min-w-0", !facetsOpen && "max-lg:hidden")}>
             <FacetPanel data={facetData} loading={facetsLoading} refine={refine} toggle={toggleRefine} patient={patient}
               onClose={() => setFacetsOpen(false)} />
@@ -277,8 +287,15 @@ export function SearchView() {
                 {browserMs != null && ` · ${Math.round(browserMs)} ms in your browser`}
                 {data.server?.cold && " · cold start"}
               </span>}
+              {data && (
+                <button type="button" onClick={() => { setSelected(null); setOverviewOpen(true); }} aria-expanded={drawerOpen && !hit}
+                  aria-controls="explain-drawer"
+                  className="ml-auto inline-flex shrink-0 items-center gap-1.5 self-center rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-2 hover:text-ink">
+                  <Gauge size={14} />How it ran
+                </button>
+              )}
               <button type="button" onClick={() => setFacetsOpen(!facetsOpen)} aria-expanded={facetsOpen}
-                className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-2 lg:hidden">
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-2 lg:hidden">
                 <Filter size={14} />Refine{activeRefinements ? ` (${activeRefinements})` : ""}
               </button>
             </div>
@@ -313,11 +330,21 @@ export function SearchView() {
           </section>
 
           {data && (
-            <aside aria-live="polite"
-              className={cx("rounded-2xl border border-line bg-surface xl:sticky xl:top-6 xl:max-h-[calc(100dvh-48px)] xl:overflow-y-auto",
-                "max-xl:fixed max-xl:inset-x-3 max-xl:bottom-3 max-xl:z-40 max-xl:max-h-[72dvh] max-xl:overflow-y-auto max-xl:shadow-pop",
-                !hit && "max-xl:hidden")}>
-              {hit ? <HitExplainer hit={hit} data={data} onClose={() => setSelected(null)} /> : <RunOverview data={data} browserMs={browserMs} />}
+            <aside id="explain-drawer" role="dialog" aria-modal="false" aria-label="How turbopuffer ran this search"
+              aria-hidden={!drawerOpen} inert={!drawerOpen}
+              className={cx("fixed inset-y-0 right-0 z-40 flex w-full max-w-[460px] flex-col border-l border-line bg-surface shadow-pop",
+                "transition-transform duration-200 ease-out motion-reduce:transition-none", drawerOpen ? "translate-x-0" : "translate-x-full")}>
+              <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
+                <span className="text-[12px] font-semibold uppercase tracking-wide text-slate">Explain</span>
+                <button type="button" onClick={closeDrawer} aria-label="Close" className="rounded-lg p-1.5 text-slate hover:bg-paper hover:text-ink">
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite">
+                {hit
+                  ? <HitExplainer hit={hit} data={data} onClose={() => { setSelected(null); setOverviewOpen(true); }} />
+                  : <RunOverview data={data} browserMs={browserMs} />}
+              </div>
             </aside>
           )}
         </div>

@@ -164,9 +164,10 @@ npm run dev                  # http://localhost:3000
 - **Cache warm-up**: selecting a patient asks turbopuffer to warm their namespace (`hint_cache_warm`). A dot on the
   selected patient in the sidebar shows cold, warming or warm, read from a tiny count query's cache temperature
   (checked once on selection and once more a few seconds later).
-- **Explain**: select any result to see its rank by meaning and by keywords, drawn as a small
-  ladder, plus its cosine distance, BM25 score, matched words, the RRF arithmetic and how it merged
-  with the other sources. With nothing selected, the panel shows how the search ran: parallel
+- **Explain** opens in a drawer from the right, so the results get the full width. A result's **Explain**
+  shows its rank by meaning and by keywords, drawn as a small ladder, plus its cosine distance, BM25 score,
+  matched words, the RRF arithmetic and how it merged with the other sources. **How it ran**, next to the
+  results count (or the back arrow from a result), shows how the search ran: parallel
   requests, server and embedding time, cache state and the exact request sent to turbopuffer. **Query plan and
   consistency** asks turbopuffer for its query plan (`explain_query`) for each subquery, and times the same request
   with strong and with eventual consistency (traced in Langfuse as `explain-search`).
