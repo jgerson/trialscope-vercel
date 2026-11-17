@@ -245,11 +245,12 @@ npm run dev                  # http://localhost:3000
   Explain) and each source reports how many positions changed and the extra server time. Boosts are off in this mode
   (the model rescores everything). If the model call fails (not enabled in your region, unknown model), the search
   falls back to turbopuffer RRF and says so. `RERANK_MODEL` (default `zeroentropy/zerank-2`) and `RERANK_CANDIDATES`.
-- **Group by** arranges the shown results into sections (sponsor/journal, status/topic, year, phase/study type,
-  condition, source) without changing ranks, so it works after any fusion, including the reranker. **At most N per**
-  asks turbopuffer to diversify instead: `limit: { total, per: { attributes: [sponsor | journal | status | topic |
-  year], limit: N } }` on each subquery, applied before fusion or reranking. The copilot can set it with
-  `max_per_source_group`.
+- **Group by** is done by turbopuffer. Picking sponsor/journal, status/topic or year (with "at most N per group")
+  sends `limit: { total, per: { attributes: [sponsor | journal | status | topic | year], limit: N } }` on each
+  subquery, so turbopuffer returns the best results with at most N per value, before fusion or reranking. The page
+  shows those rows under one heading per value, in turbopuffer's order, and re-ranks nothing. Only single-valued
+  attributes can be used this way, so phase, condition and publication type aren't offered. Links keep it as
+  `?div=org-3`. The copilot can set the same cap with `max_per_source_group`.
 - **Ranking boosts** (the **Ranking** button, and the copilot's `ranking` tool field) are optional and off by
   default. Each one adds to the keyword (BM25) subquery's score without filtering anything out:
   `Sum[ Saturate(BM25, midpoint 6), w × favor-recruiting, w × recency steps, w × evidence level, w × late phase,

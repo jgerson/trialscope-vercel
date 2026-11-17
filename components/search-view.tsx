@@ -3,12 +3,12 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Filter, Gauge, Info, Loader2, Search, Settings2, X } from "lucide-react";
-import type { CorpusStat, Fusion, Hit, Mode, Patient, SearchResponse, Source } from "@/lib/types";
+import type { CorpusStat, Fusion, Hit, Kind, Mode, Patient, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
 import { HitExplainer, RunOverview } from "./explain";
 import { warmUp } from "@/lib/use-warmup";
-import { DIVERSIFIABLE, GROUPS, groupHits, parseDiversify, type GroupKey } from "@/lib/grouping";
+import { groupHits, groupsFor, parseDiversify, type GroupKey } from "@/lib/grouping";
 import { facetDef, refineCount, refineFromParam, refineToParam, valueLabel, type FacetKey, type Refine,
   type SourceFacets } from "@/lib/facets";
 import { BOOSTS, DEFAULT_MIDPOINT, DEFAULT_SPAN, isActive, rankingFromParam, rankingToParam, STRENGTH_LABEL,
@@ -66,13 +66,13 @@ export function SearchView() {
   const [fusion, setFusion] = useState<Fusion>(
     params.get("fusion") === "app" ? "app" : params.get("fusion") === "rerank" ? "rerank" : "server");
   const [candidates, setCandidates] = useState<number>(CANDIDATES.includes(Number(params.get("cand"))) ? Number(params.get("cand")) : 20);
-  // Display grouping (browser only) and turbopuffer-side diversification (?div=org-2: at most 2 per sponsor/journal).
-  const [groupBy, setGroupBy] = useState<GroupKey | "">((GROUPS.find((g) => g.key === params.get("group"))?.key) ?? "");
-  const [diversify, setDiversify] = useState(() => {
+  // Group by, done by turbopuffer (?div=org-3: at most 3 results per sponsor/journal, shown under one heading each).
+  // Older links carry ?group=org on its own; that opens the same grouping at 3 per group.
+  const [group, setGroup] = useState<{ by: GroupKey | ""; per: number }>(() => {
     const [by, per] = (params.get("div") ?? "").split("-");
-    return parseDiversify({ by, per });
+    const d = parseDiversify({ by: by || params.get("group"), per: per || 3 });
+    return { by: d?.by ?? "", per: d?.per ?? 3 };
   });
-  const divKey = diversify ? `${diversify.by}-${diversify.per}` : "";
   const [vectorMethod, setVectorMethod] = useState<"ann" | "exact">(params.get("vec") === "exact" ? "exact" : "ann");
   // Optional boosts and recency (all off by default), kept in the URL as ?rk=… so a link reproduces the ranking.
   const [ranking, setRanking] = useState<Ranking>(() => rankingFromParam(params.get("rk")));
@@ -96,6 +96,10 @@ export function SearchView() {
   const q = params.get("q") ?? "";
   const sources: Source[] = area === "notes" ? ["notes"] : lit;
   const sourcesKey = sources.join(",");
+  // Only attributes this source has, single-valued, can be grouped by turbopuffer; anything else means no grouping.
+  const groupBy: GroupKey | "" = group.by && groupsFor(sources[0] as Kind).some((g) => g.key === group.by) ? group.by : "";
+  const diversify = groupBy ? { by: groupBy, per: group.per } : null;
+  const divKey = diversify ? `${diversify.by}-${diversify.per}` : "";
 
   const run = useCallback(async (query: string) => {
     if (!query.trim()) { setData(null); return; }
@@ -171,7 +175,6 @@ export function SearchView() {
     if (mode === "hybrid" && fusion === "rerank") { sp.set("fusion", "rerank"); if (candidates !== 20) sp.set("cand", String(candidates)); }
     if (divKey) sp.set("div", divKey);
     if (mode !== "bm25" && vectorMethod === "exact") sp.set("vec", "exact");
-    if (groupBy) sp.set("group", groupBy);
     if (refineKey) sp.set("f", refineKey);
     if (topK !== 10) sp.set("k", String(topK));
     router.replace(`/?${sp.toString()}`, { scroll: false });
@@ -301,8 +304,7 @@ export function SearchView() {
               {!data && loading && Array.from({ length: 4 }, (_, i) => <SkeletonCard key={i} />)}
               {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try removing a refinement or picking the other source.</p>}
               {data && data.hits.length > 0 && (
-                <GroupControls groupBy={groupBy} setGroupBy={setGroupBy} diversify={diversify} setDiversify={setDiversify}
-                  sources={sources} />
+                <GroupControls groupBy={groupBy} per={group.per} setGroup={setGroup} kind={sources[0] as Kind} />
               )}
               {data && (groupBy
                 ? groupHits(data.hits, groupBy).map((g) => (
@@ -403,39 +405,32 @@ function queryWords(q: string) {
     !["after", "before", "with", "from", "that", "this", "what", "does", "about", "patient", "patients"].includes(w));
 }
 
-/** Group the shown results (display only), and ask turbopuffer to cap results per sponsor/journal/status/year. */
-function GroupControls({ groupBy, setGroupBy, diversify, setDiversify, sources }: {
-  groupBy: GroupKey | ""; setGroupBy: (g: GroupKey | "") => void;
-  diversify: ReturnType<typeof parseDiversify>; setDiversify: (d: ReturnType<typeof parseDiversify>) => void; sources: Source[];
+/** Group by: turbopuffer returns at most N results per sponsor/journal, status/topic or year (limit.per). */
+function GroupControls({ groupBy, per, setGroup, kind }: {
+  groupBy: GroupKey | ""; per: number; setGroup: (g: { by: GroupKey | ""; per: number }) => void; kind: Kind;
 }) {
-  const kinds = sources.map((s) => s) as ("notes" | "pubmed" | "trials")[];
-  const meaning = (g: (typeof GROUPS)[number]) => [...new Set(kinds.map((k) => g.perKind[k]))].join(" / ");
   const select = "rounded-lg border border-line bg-surface px-2 py-1 text-[13px] text-ink-2";
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pb-1 text-[13px] text-slate">
-      <label className="inline-flex items-center gap-2">
-        Group by
-        <select className={select} value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupKey | "")}>
-          <option value="">None</option>
-          {GROUPS.map((g) => <option key={g.key} value={g.key}>{g.key === "source" ? "Source" : `${g.label} (${meaning(g)})`}</option>)}
-        </select>
-      </label>
-      <Tip text="Asks turbopuffer to return at most this many results per value (limit.per on each subquery), so one sponsor or journal can't fill the page. Applied before fusion or reranking.">
+    <Tip text="Grouping is done by turbopuffer: each request asks for the best results with at most this many per value (limit.per), and the page shows them under one heading per value, in turbopuffer's order.">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 pb-1 text-[13px] text-slate">
         <label className="inline-flex items-center gap-2">
-          At most
-          <select className={select} value={diversify?.per ?? 0}
-            onChange={(e) => { const per = Number(e.target.value); setDiversify(per ? { by: diversify?.by ?? "org", per } : null); }}>
-            <option value={0}>any number</option>
-            {[1, 2, 3].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-          per
-          <select className={select} value={diversify?.by ?? "org"} disabled={!diversify}
-            onChange={(e) => setDiversify({ by: e.target.value as GroupKey, per: diversify?.per ?? 2 })}>
-            {DIVERSIFIABLE.map((g) => <option key={g.key} value={g.key}>{meaning(g) || g.label}</option>)}
+          Group by
+          <select className={select} value={groupBy} onChange={(e) => setGroup({ by: e.target.value as GroupKey | "", per })}>
+            <option value="">None</option>
+            {groupsFor(kind).map((g) => <option key={g.key} value={g.key}>{g.perKind[kind]}</option>)}
           </select>
         </label>
-      </Tip>
-    </div>
+        {groupBy && (
+          <label className="inline-flex items-center gap-2">
+            at most
+            <select className={select} value={per} onChange={(e) => setGroup({ by: groupBy, per: Number(e.target.value) })}>
+              {[1, 2, 3, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+            per group
+          </label>
+        )}
+      </div>
+    </Tip>
   );
 }
 

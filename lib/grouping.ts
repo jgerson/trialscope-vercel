@@ -1,17 +1,12 @@
-// Group-by for search results, in two forms that share these keys:
-//
-// - Display grouping (browser only): the ranked results are arranged into sections by sponsor, journal, year and so
-//   on. Ranks don't change, so it works the same after RRF, in-app fusion or model reranking.
-// - Diversification (turbopuffer): `limit: { total, per: { attributes: [attr], limit: n } }` on each subquery caps how
-//   many results can share one value, so one sponsor or journal can't fill the top 10. turbopuffer applies it per
-//   subquery, before RRF or the reranker see the candidates. Only single-valued attributes are offered.
+// Group-by for search results, done by turbopuffer. Picking "Group by sponsor" (say) sends
+// `limit: { total, per: { attributes: ["sponsor"], limit: n } }` on each subquery: turbopuffer returns the best results
+// with at most n per sponsor, before RRF or the reranker see them. The page then shows those rows under a heading per
+// value, in turbopuffer's order. Only single-valued attributes can be used, so only those are offered.
 import type { Hit, Kind } from "./types";
 
-export type GroupKey = "source" | "org" | "category" | "year" | "design" | "condition";
+export type GroupKey = "org" | "category" | "year";
 
 const str = (v: unknown) => (v == null || v === "" ? "" : String(v));
-const first = (v: unknown, skip: string[] = []) =>
-  (Array.isArray(v) ? (v as unknown[]).map(String).find((x) => !skip.includes(x)) : undefined) ?? "";
 
 export const GROUPS: {
   key: GroupKey;
@@ -20,8 +15,6 @@ export const GROUPS: {
   diversify: Partial<Record<Kind, string>>; // turbopuffer attribute for limit.per (scalar attributes only)
   value: (h: Hit) => string;
 }[] = [
-  { key: "source", label: "Source", perKind: { trials: "source", pubmed: "source", notes: "source" }, diversify: {},
-    value: (h) => ({ trials: "Clinical trials", pubmed: "PubMed", notes: "Patient notes" })[h.kind] },
   { key: "org", label: "Sponsor / journal", perKind: { trials: "sponsor", pubmed: "journal", notes: "author" },
     diversify: { trials: "sponsor", pubmed: "journal", notes: "author" },
     value: (h) => str(h.raw[{ trials: "sponsor", pubmed: "journal", notes: "author" }[h.kind]]) },
@@ -31,11 +24,6 @@ export const GROUPS: {
   { key: "year", label: "Year", perKind: { trials: "start year", pubmed: "year", notes: "visit year" },
     diversify: { trials: "start_year", pubmed: "year" },
     value: (h) => (h.kind === "notes" ? str(h.raw.visit_date).slice(0, 4) : str(h.raw[h.kind === "trials" ? "start_year" : "year"])).replace(/^0$/, "") },
-  { key: "design", label: "Phase / study type", perKind: { trials: "phase", pubmed: "publication type", notes: "note type" }, diversify: {},
-    value: (h) => h.kind === "trials" ? ((h.raw.phases as string[] | undefined) ?? []).join(", ")
-      : h.kind === "pubmed" ? first(h.raw.pub_types, ["Journal Article", "English Abstract"]) || "Journal article" : str(h.raw.note_type) },
-  { key: "condition", label: "Condition", perKind: { trials: "first condition", pubmed: "topic", notes: "note type" }, diversify: {},
-    value: (h) => h.kind === "trials" ? first(h.raw.conditions) : h.kind === "pubmed" ? str(h.raw.topic) : str(h.raw.note_type) },
 ];
 
 export const DIVERSIFIABLE = GROUPS.filter((g) => Object.keys(g.diversify).length);
@@ -56,7 +44,13 @@ export function parseDiversify(input: unknown): Diversify | null {
 export const diversifyAttr = (d: Diversify | null, kind: Kind) =>
   (d && GROUPS.find((g) => g.key === d.by)?.diversify[kind]) || null;
 
-/** Arrange ranked hits into groups, ordered by each group's best rank; ranks inside a group keep their order. */
+/** Group keys turbopuffer can group one source by (its attribute must be single-valued). */
+export const groupsFor = (kind: Kind) => GROUPS.filter((g) => g.diversify[kind]);
+
+/**
+ * Lay out the rows turbopuffer returned (already capped per value by limit.per) under one heading per value, ordered
+ * by each group's best rank; ranks inside a group keep turbopuffer's order. Nothing is re-ranked or dropped here.
+ */
 export function groupHits(hits: Hit[], key: GroupKey): { name: string; hits: Hit[]; best: number }[] {
   const g = GROUPS.find((x) => x.key === key)!;
   const map = new Map<string, Hit[]>();
