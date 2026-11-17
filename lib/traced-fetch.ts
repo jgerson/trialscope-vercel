@@ -4,7 +4,9 @@
 // Langfuse keys, it's plain fetch.
 //
 // Recorded: method, host, path, status, time until the response headers arrived, and request and response sizes.
-// Never recorded: bodies, query strings or headers (they can hold keys and patient text).
+// For turbopuffer reads, also the full URL and the JSON request body, so the span is the exact call (paste it into
+// curl with your own key). Never recorded: headers (they hold keys), query strings, response bodies, any request body
+// sent elsewhere (model prompts carry patient text), and turbopuffer write bodies (their rows can hold patient notes).
 import "server-only";
 import { startObservation } from "@langfuse/tracing";
 import { langfuseEnabled, langfuseReady } from "./langfuse-setup";
@@ -24,7 +26,7 @@ export const tracedFetch: typeof fetch = async (input, init) => {
   let span: any;
   try {
     span = startObservation(`http ${method} ${url.host}`, {
-      input: { method, host: url.host, path: url.pathname },
+      input: { method, host: url.host, path: url.pathname, ...tpufRequest(url, init?.body) },
       metadata: { kind: "http", method, host: url.host, path: url.pathname, requestBytes },
     }, { asType: "span" });
   } catch {
@@ -48,6 +50,30 @@ export const tracedFetch: typeof fetch = async (input, init) => {
     throw e;
   }
 };
+
+const TPUF_HOST = /(^|\.)turbopuffer\.com$/;
+// Request keys that make a turbopuffer call a write; their bodies are never recorded.
+const WRITE_KEYS = ["upsert_rows", "upsert_columns", "patch_rows", "patch_columns", "deletes", "delete_by_filter",
+  "patch_by_filter", "copy_from_namespace"];
+const MAX_BODY_CHARS = 16_000;
+
+/** For a turbopuffer call: the full URL and, for a read, its JSON body. Nothing for any other host. */
+function tpufRequest(url: URL, body: unknown): { url?: string; body?: unknown } {
+  if (!TPUF_HOST.test(url.host)) return {};
+  const full = { url: `${url.origin}${url.pathname}` };
+  if (typeof body !== "string" || !body) return full;
+  let json: unknown;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    return full;
+  }
+  if (json && typeof json === "object" && WRITE_KEYS.some((k) => k in json)) {
+    return { ...full, body: { omitted: "write request (rows can hold patient notes)" } };
+  }
+  if (body.length > MAX_BODY_CHARS) return { ...full, body: { omitted: `request body over ${MAX_BODY_CHARS} characters`, chars: body.length } };
+  return { ...full, body: json };
+}
 
 function safe(f: () => unknown) {
   try {
