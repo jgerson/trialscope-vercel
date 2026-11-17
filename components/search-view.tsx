@@ -283,11 +283,6 @@ export function SearchView() {
           <section aria-label="Results" aria-busy={loading}>
             <div className="flex items-baseline gap-3">
               <h2 className="font-display text-[32px] leading-none tracking-tight">{data ? `${data.hits.length} results` : "Searching"}</h2>
-              {data && <span className="text-[13.5px] text-slate">
-                {MODES.find((m) => m.value === data.mode)?.label}{data.mode === "hybrid" ? ` (${data.fusion === "rerank" ? "model reranked" : `fused ${data.fusion === "server" ? "on turbopuffer" : "in app"}`})` : ""} search across {data.runs.length} source{data.runs.length > 1 ? "s" : ""}, {Math.round(data.wallMs)} ms
-                {browserMs != null && ` · ${Math.round(browserMs)} ms in your browser`}
-                {data.server?.cold && " · cold start"}
-              </span>}
               {data && (
                 <button type="button" onClick={() => { setSelected(null); setOverviewOpen(true); }} aria-expanded={drawerOpen && !hit}
                   aria-controls="explain-drawer"
