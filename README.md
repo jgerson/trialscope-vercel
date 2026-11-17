@@ -108,6 +108,9 @@ observation (a retriever for reads, a span for writes) with its request, timings
   each tool call, with the filters turbopuffer applied. Questions in one copilot conversation share a session.
 - **Eligibility** (`check-trial-eligibility`, tagged `eligibility`): `fetch-trial` and `read-patient-notes`, then the
   `assess-eligibility-criteria` generation.
+- **Warm-up** (`warm-up`, tagged `warm-up`): `turbopuffer-hint-cache-warm` and `turbopuffer-warm-check` for each
+  namespace a search reads, with each one's cache temperature. The route loads Langfuse's exporter before it starts, so
+  a warm-up on a cold instance is traced too.
 
 Inside these traces you can also find:
 
@@ -122,6 +125,11 @@ Inside these traces you can also find:
 - **User feedback.** Thumbs up/down under each copilot answer posts to `/api/feedback`, which records a `user-feedback`
   score (BOOLEAN, 1 good, 0 bad) on that answer's trace through Langfuse's public scores API. Changing the vote replaces
   the score. The buttons only appear when tracing is on.
+
+**Sessions.** Each browser gets a random visit id in an HttpOnly cookie (`ts_visit`, set by `proxy.ts`, see
+`lib/visit.ts`) that expires after 30 minutes without a request. Every trace is sent with it as its session, so in
+Langfuse's Sessions view one visit's warm-up, searches and Explains read as one timeline. Copilot questions keep their
+own session, one per conversation.
 
 Traces carry the Clerk user id, the Vercel environment (`production`, `preview`, `development`) and the commit as
 the release. Costs are AI Gateway list prices. The setup is in `lib/langfuse-setup.ts` and `lib/langfuse.ts`; without

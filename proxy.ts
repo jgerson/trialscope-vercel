@@ -2,6 +2,8 @@
 // accounts are created in Clerk's dashboard (the instance is invite-only).
 // Pages redirect to the app's /sign-in; API routes get a 404 from auth.protect() (and a 401 from their own check).
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
+import { touchVisit, VISIT_COOKIE } from "./lib/visit";
 
 const isPublic = createRouteMatcher(["/sign-in(.*)"]);
 
@@ -10,6 +12,8 @@ const AUTHORIZED_ORIGINS = ["https://www.trialscope.space", "https://trialscope.
 export default clerkMiddleware(
   async (auth, req) => {
     if (!isPublic(req)) await auth.protect();
+    // Start or extend the visit (lib/visit.ts): the id Langfuse groups this browser's traces by.
+    return touchVisit(NextResponse.next(), req.cookies.get(VISIT_COOKIE)?.value);
   },
   // Without these, auth.protect() sends signed-out visitors to Clerk's hosted page instead of the app's own,
   // styled /sign-in. ClerkProvider in app/layout.tsx is given the same path.

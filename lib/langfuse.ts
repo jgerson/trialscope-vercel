@@ -6,19 +6,40 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { context, ROOT_CONTEXT } from "@opentelemetry/api";
 import { propagateAttributes, startObservation, type PropagateAttributesParams } from "@langfuse/tracing";
+import { cookies } from "next/headers";
 import { ensureLangfuse } from "./langfuse-setup";
+import { parseVisit, VISIT_COOKIE } from "./visit";
 import { priced, priceOf, type Price } from "./pricing";
 
 export { flushLangfuse } from "./langfuse-setup";
 
 /**
  * Run `fn` as the start of a new trace: detached from any incoming request context, with user, session, tags and
- * metadata applied to every observation created inside it.
+ * metadata applied to every observation created inside it. Unless the caller passes its own sessionId (the copilot
+ * uses its conversation), the session is the browser's visit (lib/visit.ts), so one visit's traces group together.
+ * Null and undefined metadata values are dropped: Langfuse warns about and discards them anyway.
  */
-export function newTrace<T>(attributes: PropagateAttributesParams, fn: () => T): T {
+export async function newTrace<T>(attributes: PropagateAttributesParams, fn: () => T): Promise<Awaited<T>> {
   void ensureLangfuse(); // starts the background load if needed; a request that arrives before it finishes goes untraced
-  return tracing.run(true, () => context.with(ROOT_CONTEXT, () => propagateAttributes(attributes, fn)));
+  const sessionId = attributes.sessionId ?? (await visitId());
+  const attrs: PropagateAttributesParams = {
+    ...attributes,
+    ...(sessionId ? { sessionId } : {}),
+    ...(attributes.metadata ? { metadata: dropEmpty(attributes.metadata) } : {}),
+  };
+  return await tracing.run(true, () => context.with(ROOT_CONTEXT, () => propagateAttributes(attrs, fn)));
 }
+
+/** This request's visit id, or undefined outside a request (a script) or before the browser has one. */
+async function visitId(): Promise<string | undefined> {
+  try {
+    return parseVisit((await cookies()).get(VISIT_COOKIE)?.value) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const dropEmpty = (m: Record<string, unknown>) => Object.fromEntries(Object.entries(m).filter(([, v]) => v != null));
 
 // Set inside newTrace, so code below it (the turbopuffer logger) can tell a traced request from a plain page load.
 const tracing = new AsyncLocalStorage<true>();
