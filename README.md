@@ -97,7 +97,7 @@ With the Langfuse keys set, every search, note save, copilot question and eligib
 observation (a retriever for reads, a span for writes) with its request, timings, billed bytes and top results:
 
 - **Search page** (`search-page`, tagged `search`): the query, sources, mode and filters, then one `turbopuffer-search` per
-  namespace queried, and the merged top ten.
+  namespace queried, and the top ten.
 - **Note save** (`save-note`, tagged `notes`): `turbopuffer-read-previous-note`, `turbopuffer-write-note` and
   `turbopuffer-wait-until-visible`, with insert or update and where the time went.
 - **Explain** (`explain-search`, tagged `explain`): `turbopuffer-explain-query` per subquery, then
@@ -157,8 +157,8 @@ npm run dev                  # http://localhost:3000
 
 ## What's inside
 
-- **Search** (`/`): search either the selected patient's notes or PubMed abstracts, trials or both
-  (never notes and literature at once). Every source and retrieval mode (hybrid, vector or BM25) has a tooltip
+- **Search** (`/`): search the selected patient's notes, PubMed abstracts or trials, one source
+  per search. Every source and retrieval mode (hybrid, vector or BM25) has a tooltip
   saying where the data comes from or what the mode matches. Links are shareable: `/?q=...&in=notes` or
   `&in=pubmed,trials`. The technical knobs (how hybrid fuses, approximate vs exact vectors, results per source) sit in
   a **Search settings** popover so refining is the main way to narrow a search.
@@ -179,7 +179,7 @@ npm run dev                  # http://localhost:3000
   (checked once on selection and once more a few seconds later).
 - **Explain** opens in a drawer from the right, so the results get the full width. A result's **Explain**
   shows its rank by meaning and by keywords, drawn as a small ladder, plus its cosine distance, BM25 score,
-  matched words, the RRF arithmetic and how it merged with the other sources. **How it ran**, next to the
+  matched words, and, in hybrid mode, the RRF arithmetic. **How it ran**, next to the
   results count (or the back arrow from a result), shows how the search ran: parallel
   requests, server and embedding time, cache state and the exact request sent to turbopuffer. **Query plan and
   consistency** asks turbopuffer for its query plan (`explain_query`) for each subquery, and times the same request
@@ -274,9 +274,10 @@ npm run dev                  # http://localhost:3000
 - **Langfuse loads lazily**: the exporter and OpenTelemetry SDK (about 55–70 ms of a cold start) are imported in the
   background instead of at startup. The warm-up waits for them; a request that reaches a cold instance before they've
   loaded runs untraced (its log line is still written).
-- **Several sources** are queried in parallel and merged by rank. That merge always runs in the
-  app, because a multi-query (and so turbopuffer's RRF) covers one namespace.
-- **Several sources** are queried in parallel and merged by rank.
+- **One source per search**: the search page queries one namespace at a time (abstracts or trials), so every rank
+  and score on the page comes straight from turbopuffer. turbopuffer queries one namespace per request, and merging
+  two would need a formula of the app's own (it used to interleave them by rank); the copilot's search tool still
+  merges sources that way, since the model reads the combined list.
 
 ## Data
 

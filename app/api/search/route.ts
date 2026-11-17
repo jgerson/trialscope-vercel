@@ -40,7 +40,8 @@ export async function POST(req: Request) {
 
   const sources = parseSources(body.sources, body.scope);
 
-  // Either the selected patient's notes, or any mix of the shared corpora; the search page never mixes the two.
+  // One source per search: the selected patient's notes, abstracts or trials. Every rank is then turbopuffer's own, with
+  // no cross-source merge in the app.
   const targets: { namespace: string; filter: unknown[] | null }[] = [];
   if (sources.includes("notes") && patient) targets.push({ namespace: NS.patient(patient.id), filter: buildFilters("notes", f) });
   if (sources.includes("pubmed")) targets.push({ namespace: NS.pubmed, filter: buildFilters("pubmed", f) });
@@ -74,14 +75,14 @@ export async function POST(req: Request) {
 const ALL: Source[] = ["notes", "pubmed", "trials"];
 
 /**
- * The sources to search. Older links send `scope` instead: "patient", "literature", "trials" or "all"
+ * The source to search (one per search, so every rank is turbopuffer's own). Older links send `scope` instead: "patient", "literature", "trials" or "all"
  * (and "fulltext", from when full-text articles were searchable, which now means abstracts).
  */
 function parseSources(sources: unknown, scope?: string): Source[] {
   if (Array.isArray(sources)) {
     const picked = ALL.filter((s) => sources.includes(s));
-    return picked.includes("notes") ? ["notes"] : picked;
+    return [picked.includes("notes") ? "notes" : picked[0] ?? "pubmed"];
   }
   return ({ patient: ["notes"], literature: ["pubmed"], fulltext: ["pubmed"], trials: ["trials"] } as Record<string, Source[]>)[scope ?? ""]
-    ?? ["pubmed", "trials"];
+    ?? ["pubmed"];
 }

@@ -38,15 +38,18 @@ const VECTOR_METHODS: { value: "ann" | "exact"; label: string; hint: string }[] 
 
 type Area = "notes" | "literature";
 
-/** Sources from the URL: `in=notes` or `in=pubmed,trials`; older links use `scope`. */
+/**
+ * Sources from the URL: `in=notes`, `in=pubmed` or `in=trials`; older links use `scope`. Each search runs on one source,
+ * so every rank on the page is turbopuffer's own; an old `in=pubmed,trials` link opens the first.
+ */
 function initialSources(params: URLSearchParams): { area: Area; lit: Source[] } {
   const inParam = params.get("in");
-  if (inParam === "notes" || params.get("scope") === "patient") return { area: "notes", lit: LITERATURE };
+  if (inParam === "notes" || params.get("scope") === "patient") return { area: "notes", lit: ["pubmed"] };
   const picked = (inParam ?? "").split(",").filter((s): s is Source => LITERATURE.includes(s as Source));
-  if (picked.length) return { area: "literature", lit: picked };
+  if (picked.length) return { area: "literature", lit: [picked[0]] };
   // "fulltext" is from when full-text articles were searchable; it now opens abstracts.
   const legacy = ({ literature: ["pubmed"], fulltext: ["pubmed"], trials: ["trials"] } as Record<string, Source[]>)[params.get("scope") ?? ""];
-  return { area: "literature", lit: legacy?.length ? legacy : LITERATURE };
+  return { area: "literature", lit: legacy?.length ? legacy : ["pubmed"] };
 }
 
 const gb = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`);
@@ -177,10 +180,8 @@ export function SearchView() {
     if (text.trim() === q.trim()) run(text);
   };
 
-  const toggleLit = (s: Source) => setSources(({ lit: cur }) => {
-    const next = cur.includes(s) ? cur.filter((x) => x !== s) : LITERATURE.filter((x) => x === s || cur.includes(x));
-    return { area: "literature", lit: next.length ? next : cur }; // at least one stays on
-  });
+  // One source at a time: abstracts or trials. No cross-source merge, so every rank comes straight from turbopuffer.
+  const pickLit = (s: Source) => setSources({ area: "literature", lit: [s] });
 
   const hit = data?.hits.find((h) => h.key === selected) ?? null;
   const drawerOpen = !!data && (overviewOpen || hit != null);
@@ -228,13 +229,13 @@ export function SearchView() {
             { value: "notes", label: notesLabel, hint: patient
               ? `Only ${patient.name}'s chart notes, in their own turbopuffer namespace (ts-patient-${patient.id}). Synthetic, written by a script.`
               : "Pick a patient on the left to search their chart notes. Each patient has their own turbopuffer namespace." },
-            { value: "literature", label: "Literature and trials", hint: "Public medical literature and trials. Pick abstracts, trials or both." },
+            { value: "literature", label: "Literature and trials", hint: "Public medical literature and trials. Pick abstracts or trials: each search covers one source, ranked by turbopuffer." },
           ]} />
           {area === "literature" && (
-            <div role="group" aria-label="Sources" className="inline-flex flex-wrap gap-1.5">
+            <div role="radiogroup" aria-label="Source" className="inline-flex flex-wrap gap-1.5">
               {LITERATURE.map((s) => (
                 <Tip key={s} text={sourceHint(s, stats)}>
-                  <button type="button" aria-pressed={lit.includes(s)} onClick={() => toggleLit(s)}
+                  <button type="button" role="radio" aria-checked={lit.includes(s)} onClick={() => pickLit(s)}
                     className={cx("inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-medium",
                       lit.includes(s) ? "border-ink bg-ink text-white" : "border-line bg-surface text-slate hover:text-ink")}>
                     <span aria-hidden className={cx("size-1.5 rounded-full", { pubmed: "bg-pubmed", trials: "bg-trials", notes: "bg-notes" }[s],
@@ -303,7 +304,7 @@ export function SearchView() {
               total={facetData.length === 1 ? facetData[0].total : null} />
             <div className={cx("mt-4 space-y-2.5 transition-opacity", loading && data && "opacity-50")}>
               {!data && loading && Array.from({ length: 4 }, (_, i) => <SkeletonCard key={i} />)}
-              {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try removing a refinement or picking different sources.</p>}
+              {data?.hits.length === 0 && <p className="py-10 text-slate">No matches. Try removing a refinement or picking the other source.</p>}
               {data && data.hits.length > 0 && (
                 <GroupControls groupBy={groupBy} setGroupBy={setGroupBy} diversify={diversify} setDiversify={setDiversify}
                   sources={sources} />
