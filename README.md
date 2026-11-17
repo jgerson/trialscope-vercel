@@ -179,11 +179,9 @@ npm run dev                  # http://localhost:3000
   (checked once on selection and once more a few seconds later).
 - **Explain** opens in a drawer from the right, so the results get the full width. A result's **Explain**
   shows its rank by meaning and by keywords, drawn as a small ladder, plus its cosine distance, BM25 score,
-  matched words, and, in hybrid mode, the RRF arithmetic. **How it ran**, next to the
-  results count (or the back arrow from a result), shows how the search ran: parallel
-  requests, server and embedding time, cache state and the exact request sent to turbopuffer. **Query plan and
-  consistency** asks turbopuffer for its query plan (`explain_query`) for each subquery, and times the same request
-  with strong and with eventual consistency (traced in Langfuse as `explain-search`).
+  matched words, and, in hybrid mode, the RRF arithmetic. The search-level overview (timings, cache state, the exact
+  request, query plan and consistency) is hidden from the page for now; `RunOverview` in `components/explain.tsx`
+  still has it, and every search's request and timings are in Langfuse.
 - **Patient workspace** (`/patients/[id]`): notes list, a markdown editor with read and edit modes,
   and a save that reports how soon the note became searchable (usually tens of milliseconds).
   **Details** on a save opens "What the save did": insert or update and the diff, where the time went (network,

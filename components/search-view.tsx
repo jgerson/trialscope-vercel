@@ -2,11 +2,11 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Filter, Gauge, Info, Loader2, Search, Settings2, X } from "lucide-react";
+import { ArrowUpRight, ArrowUpWideNarrow, ClipboardCheck, Filter, Info, Loader2, Search, Settings2, X } from "lucide-react";
 import type { CorpusStat, Fusion, Hit, Kind, Mode, Patient, SearchResponse, Source } from "@/lib/types";
 import { useApp } from "./app-shell";
 import { useCorpus } from "@/lib/use-corpus";
-import { HitExplainer, RunOverview } from "./explain";
+import { HitExplainer } from "./explain";
 import { warmUp } from "@/lib/use-warmup";
 import { groupHits, groupsFor, parseDiversify, type GroupKey } from "@/lib/grouping";
 import { facetDef, refineCount, refineFromParam, refineToParam, valueLabel, type FacetKey, type Refine,
@@ -83,14 +83,10 @@ export function SearchView() {
   const [topK, setTopK] = useState(() => Math.min(30, Math.max(5, Number(params.get("k")) || 10)));
   const [facetsOpen, setFacetsOpen] = useState(false); // below lg the panel opens from a Refine button
   const [data, setData] = useState<SearchResponse | null>(null);
-  // Browser timing: from pressing Search to the results being painted (set after the next frame).
-  const [browserMs, setBrowserMs] = useState<number | null>(null);
-  const searchStart = useRef<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  // The Explain drawer: open on "How it ran" (the search overview) or on a result's Explain (that result).
-  const [overviewOpen, setOverviewOpen] = useState(false);
+  // The Explain drawer opens on a result's Explain.
   const [facetData, setFacetData] = useState<SourceFacets[]>([]);
   const [facetsLoading, setFacetsLoading] = useState(false);
   const q = params.get("q") ?? "";
@@ -104,7 +100,6 @@ export function SearchView() {
   const run = useCallback(async (query: string) => {
     if (!query.trim()) { setData(null); return; }
     setLoading(true); setError(null);
-    searchStart.current = performance.now();
     try {
       const res = await fetch("/api/search", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -122,14 +117,6 @@ export function SearchView() {
       setLoading(false);
     }
   }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, vectorMethod, refineKey, topK, patient?.id]);
-
-  // Once new results are on screen, record how long the whole search took as you experienced it.
-  useEffect(() => {
-    if (!data || searchStart.current == null) return;
-    const t0 = searchStart.current;
-    searchStart.current = null;
-    requestAnimationFrame(() => requestAnimationFrame(() => setBrowserMs(performance.now() - t0)));
-  }, [data]);
 
   // Warm the server and turbopuffer on page load, unless a search is about to run anyway (see lib/use-warmup.ts).
   useEffect(() => { if (!params.get("q")) warmUp(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -187,8 +174,8 @@ export function SearchView() {
   const pickLit = (s: Source) => setSources({ area: "literature", lit: [s] });
 
   const hit = data?.hits.find((h) => h.key === selected) ?? null;
-  const drawerOpen = !!data && (overviewOpen || hit != null);
-  const closeDrawer = useCallback(() => { setOverviewOpen(false); setSelected(null); }, []);
+  const drawerOpen = !!data && hit != null;
+  const closeDrawer = useCallback(() => setSelected(null), []);
   useEffect(() => {
     if (!drawerOpen) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDrawer(); };
@@ -286,13 +273,6 @@ export function SearchView() {
           <section aria-label="Results" aria-busy={loading}>
             <div className="flex items-baseline gap-3">
               <h2 className="font-display text-[32px] leading-none tracking-tight">{data ? `${data.hits.length} results` : "Searching"}</h2>
-              {data && (
-                <button type="button" onClick={() => { setSelected(null); setOverviewOpen(true); }} aria-expanded={drawerOpen && !hit}
-                  aria-controls="explain-drawer"
-                  className="ml-auto inline-flex shrink-0 items-center gap-1.5 self-center rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-2 hover:text-ink">
-                  <Gauge size={14} />How it ran
-                </button>
-              )}
               <button type="button" onClick={() => setFacetsOpen(!facetsOpen)} aria-expanded={facetsOpen}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-1.5 text-[13px] font-medium text-ink-2 lg:hidden">
                 <Filter size={14} />Refine{activeRefinements ? ` (${activeRefinements})` : ""}
@@ -339,9 +319,7 @@ export function SearchView() {
                 </button>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto" aria-live="polite">
-                {hit
-                  ? <HitExplainer hit={hit} data={data} onClose={() => { setSelected(null); setOverviewOpen(true); }} />
-                  : <RunOverview data={data} browserMs={browserMs} />}
+                {hit && <HitExplainer hit={hit} data={data} onClose={closeDrawer} closeLabel="Close" />}
               </div>
             </aside>
           )}
