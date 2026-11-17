@@ -7,8 +7,9 @@ import { explainRun } from "@/lib/tpuf";
 
 export const dynamic = "force-dynamic";
 
-// Only the parts of a search request the app itself sends; anything else is dropped.
-const KEYS = ["rank_by", "top_k", "filters"];
+// Only the parts of a search request the app itself sends; anything else is dropped. `limit` is how a grouped search
+// asks for at most N per value.
+const KEYS = ["rank_by", "top_k", "limit", "filters"];
 const clean = (q: unknown) =>
   Object.fromEntries(Object.entries((q ?? {}) as Record<string, unknown>).filter(([k]) => KEYS.includes(k)));
 
@@ -20,7 +21,13 @@ export async function POST(req: Request) {
   const namespace = String(body.namespace ?? "");
   if (!namespace.startsWith(NS.prefix)) return NextResponse.json({ error: "Unknown namespace." }, { status: 400 });
   const raw = body.request ?? {};
-  const request = Array.isArray(raw.queries) ? { queries: (raw.queries as unknown[]).slice(0, 2).map(clean) } : clean(raw);
+  // A hybrid search fused on turbopuffer is timed as it ran, with rerank_by ["RRF"] and its limit. A model rerank is
+  // timed as RRF, so this check never pays for the model.
+  const fused = Array.isArray(raw.rerank_by) || (raw.rerank_by && typeof raw.rerank_by === "object");
+  const request = Array.isArray(raw.queries)
+    ? { queries: (raw.queries as unknown[]).slice(0, 2).map(clean),
+        ...(fused ? { rerank_by: ["RRF"], ...(typeof raw.limit === "number" ? { limit: raw.limit } : {}) } : {}) }
+    : clean(raw);
   if (!Object.keys(request).length) return NextResponse.json({ error: "Nothing to explain." }, { status: 400 });
 
   after(flushLangfuse);

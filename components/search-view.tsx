@@ -97,32 +97,46 @@ export function SearchView() {
   const diversify = groupBy ? { by: groupBy, per: group.per } : null;
   const divKey = diversify ? `${diversify.by}-${diversify.per}` : "";
 
+  // Only the latest search counts: starting one cancels the one in flight, and a cancelled search's late answer is
+  // ignored, so quick control changes (stepping the result count, say) can't show stale results.
+  const inflight = useRef<AbortController | null>(null);
   const run = useCallback(async (query: string) => {
-    if (!query.trim()) { setData(null); return; }
+    inflight.current?.abort();
+    inflight.current = null;
+    if (!query.trim()) { setData(null); setLoading(false); return; }
+    const ctl = new AbortController();
+    inflight.current = ctl;
     setLoading(true); setError(null);
     try {
       const res = await fetch("/api/search", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" }, signal: ctl.signal,
         body: JSON.stringify({ q: query, sources: sourcesKey.split(","), mode, fusion, ranking: rankingFromParam(rankingKey),
           diversify: divKey ? { by: divKey.split("-")[0], per: Number(divKey.split("-")[1]) } : null, candidates,
           exact: mode !== "bm25" && vectorMethod === "exact",
           filters: { refine: refineFromParam(refineKey) }, topK, patientId: patient?.id }),
       });
       const json = await res.json();
+      if (ctl.signal.aborted) return;
       if (!res.ok) throw new Error(json.error ?? "Search failed.");
       setData(json); setSelected(null);
     } catch (e) {
+      if (ctl.signal.aborted) return;
       setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (inflight.current === ctl) { inflight.current = null; setLoading(false); }
     }
   }, [sourcesKey, mode, fusion, candidates, rankingKey, divKey, vectorMethod, refineKey, topK, patient?.id]);
 
   // Warm the server and turbopuffer on page load, unless a search is about to run anyway (see lib/use-warmup.ts).
   useEffect(() => { if (!params.get("q")) warmUp(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-run whenever the query in the URL or any control changes.
-  useEffect(() => { setInput(q); run(q); }, [q, run]);
+  // Re-run whenever the query in the URL or any control changes, after a short pause, so stepping a control several
+  // times sends one search instead of one per step.
+  useEffect(() => {
+    setInput(q);
+    const t = setTimeout(() => run(q), 150);
+    return () => clearTimeout(t);
+  }, [q, run]);
 
   // Facet counts for the sources being searched, scoped to the query, with every other refinement applied.
   useEffect(() => {
@@ -204,7 +218,7 @@ export function SearchView() {
 
         <form onSubmit={(e) => { e.preventDefault(); submit(input); }} className="group relative max-w-[980px]">
           <Search className="pointer-events-none absolute top-1/2 left-5 -translate-y-1/2 text-slate" size={20} />
-          <input value={input} onChange={(e) => setInput(e.target.value)} onFocus={warmUp} aria-label="Search"
+          <input value={input} onChange={(e) => { setInput(e.target.value); warmUp(); }} onFocus={warmUp} aria-label="Search"
             placeholder={area === "notes" ? `Search ${patient ? `${patient.name}'s` : "a patient's"} notes` : "A drug, a gene, a trial ID or a clinical question"}
             className="h-[60px] w-full rounded-2xl border border-line bg-surface pr-28 pl-14 text-[17px] text-ink transition placeholder:text-slate/70 focus:border-ink focus:ring-4 focus:ring-ink/5 focus:outline-none" />
           <button type="submit" className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded-xl bg-ink px-4 py-2.5 text-[14px] font-semibold text-white hover:bg-ink-2">
