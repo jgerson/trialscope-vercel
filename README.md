@@ -118,6 +118,11 @@ Inside these traces you can also find:
   is an `http <METHOD> <host>` span under the step that made it, with path, status, time to response headers and
   sizes. Retries show as separate spans. For turbopuffer reads the span also has the full URL and the JSON request body, so it is the exact API call (paste it into curl with your own key); write bodies are left out, since their rows can hold patient notes. Headers, query strings, response bodies and request bodies to any other host (model prompts carry patient text) are never recorded. This is a custom `fetch`
   passed to the SDK clients (`lib/traced-fetch.ts`), so trace names and structure stay the same; outside a trace it's plain `fetch`.
+- **Server-side embedding.** With native embedding, turbopuffer embeds the query with voyage-4-lite on its own
+  servers inside the same HTTP call, so there's no separate request to see. When turbopuffer reports the time it took
+  (`embeddingMs`), the `turbopuffer-<label>` step gets an `embed-query (in turbopuffer)` embedding observation with that
+  duration and the text embedded (for writes, only the row count). The duration is turbopuffer's; its position in the
+  timeline is an estimate.
 - **Filterable turbopuffer details.** Each `turbopuffer-<label>` observation has flat metadata you can filter and chart
   on in Langfuse: `label`, `op`, `namespace`, `ms`, `serverMs`, `networkMs`, `embeddingMs`, `cache`, `rowsTotal`
   (`rowsVector`/`rowsBm25` for hybrid), `billedBytesQueried`, `billedBytesWritten` and `slow`. Calls of a second or more

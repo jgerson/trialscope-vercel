@@ -12,8 +12,9 @@
 // call still goes through.
 import "server-only";
 import { after } from "next/server";
-import { getActiveTraceId, startActiveObservation } from "@langfuse/tracing";
+import { getActiveTraceId, startActiveObservation, startObservation } from "@langfuse/tracing";
 import { langfuseEnabled, langfuseReady } from "./langfuse-setup";
+import { config } from "./config";
 import { flushLangfuse, insideTrace, newTrace } from "./langfuse";
 
 export type TpufOp = "query" | "multi_query" | "write" | "metadata" | "warm" | "explain";
@@ -55,6 +56,7 @@ export async function tpCall<T>(op: TpufOp, namespace: string, request: Record<s
   const logged = loggable(op, request);
   const exec = async (observe?: (u: Record<string, unknown>) => void): Promise<T> => {
     const t0 = performance.now();
+    const startedAt = Date.now();
     try {
       const res = await run();
       const summary = { ...summarize(op, res), ...(opts.extra?.(res) ?? {}) };
@@ -64,6 +66,7 @@ export async function tpCall<T>(op: TpufOp, namespace: string, request: Record<s
       line({ tpuf: opts.label, op, namespace, ms, ...(networkMs !== undefined ? { networkMs } : {}), ...summary, request: logged });
       observe?.({ output: summary, metadata: searchable(opts.label, op, namespace, ms, networkMs, summary),
         ...(ms >= SLOW_MS ? { level: "WARNING", statusMessage: `slow turbopuffer call: ${Math.round(ms)} ms${summary.cache ? `, cache ${summary.cache}` : ""}` } : {}) });
+      if (observe) embeddingSpan(op, request, summary, startedAt, ms, networkMs);
       return res;
     } catch (e) {
       const err = errorOf(e);
@@ -89,6 +92,51 @@ export async function tpCall<T>(op: TpufOp, namespace: string, request: Record<s
     // Outside a request (a script), there's nothing to schedule; spans flush on the next batch.
   }
   return newTrace({ tags: ["page-load"], traceName: `turbopuffer-${opts.label}` }, observed);
+}
+
+/**
+ * With native embedding, turbopuffer embeds the query (or written text) on its own servers, inside the same HTTP call,
+ * so the app never sees a separate request. turbopuffer reports the time it took (performance.embedding_ms); this
+ * records it as an `embed-query (in turbopuffer)` embedding observation under the turbopuffer step, so the tree shows
+ * where the server time went. Its duration is turbopuffer's figure; where it sits in the timeline is an estimate
+ * (half the network time after the call started, since embedding runs at the start of the server's work).
+ */
+function embeddingSpan(op: TpufOp, request: Record<string, unknown>, summary: Record<string, unknown>, startedAt: number,
+  ms: number, networkMs: number | undefined) {
+  const embeddingMs = summary.embeddingMs;
+  if (typeof embeddingMs !== "number" || embeddingMs <= 0) return;
+  try {
+    const start = startedAt + Math.max(0, (networkMs ?? 0) / 2);
+    const end = Math.min(start + embeddingMs, startedAt + ms);
+    const text = op === "write" ? null : embeddedText(request);
+    startObservation("embed-query (in turbopuffer)", {
+      model: config.embedModel,
+      // Writes: the rows can hold patient notes, so only their count is recorded.
+      input: text != null ? { text } : { rows: Array.isArray(request.upsert_rows) ? request.upsert_rows.length : undefined },
+      metadata: { embeddingMs, serverSide: true, timing: "duration from turbopuffer; position estimated", serverMs: summary.serverMs },
+    }, { asType: "embedding", startTime: new Date(start) }).end(new Date(end));
+  } catch {
+    // ignore: a tracing problem must not fail the request
+  }
+}
+
+/** The text sent for embedding in a query: the first ["Embed", text] in rank_by (a multi_query embeds it once). */
+function embeddedText(request: Record<string, unknown>): string | null {
+  const find = (v: unknown): string | null => {
+    if (!Array.isArray(v)) return null;
+    if (v[0] === "Embed" && typeof v[1] === "string") return v[1];
+    for (const x of v) {
+      const hit = find(x);
+      if (hit != null) return hit;
+    }
+    return null;
+  };
+  const queries = Array.isArray(request.queries) ? (request.queries as Record<string, unknown>[]) : [request];
+  for (const q of queries) {
+    const hit = find(q.rank_by);
+    if (hit != null) return hit;
+  }
+  return null;
 }
 
 /** Wrap exec in a Langfuse observation. If Langfuse itself throws, run the call without it. */
